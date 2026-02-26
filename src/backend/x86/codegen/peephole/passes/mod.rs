@@ -247,6 +247,25 @@ mod tests {
     }
 
     #[test]
+    fn test_compare_branch_no_fuse_when_rax_is_reloaded_from_other_slot() {
+        // setcc materializes a boolean in %rax, but %rax is then reloaded from
+        // a different stack slot before the final test/branch.
+        // This must not be fused.
+        let asm = [
+            "    testq %rax, %rax",
+            "    setne %al",
+            "    movzbq %al, %rax",
+            "    movq -16(%rbp), %rax",
+            "    testq %rax, %rax",
+            "    je .LBB11",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("setne %al"), "must keep setcc: {}", result);
+        assert!(result.contains("movq -16(%rbp), %rax"), "must keep reload: {}", result);
+        assert!(result.contains("testq %rax, %rax"), "must keep final test: {}", result);
+    }
+
+    #[test]
     fn test_non_adjacent_store_load_same_reg() {
         let asm = [
             "    movq %rax, -24(%rbp)",
@@ -1201,4 +1220,3 @@ mod regression_tests {
             "struct param store at -8(%rbp) must NOT be NOP'd when -4(%rbp) is read: {}", result);
     }
 }
-

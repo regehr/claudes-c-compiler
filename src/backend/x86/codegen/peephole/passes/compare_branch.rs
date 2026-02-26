@@ -36,7 +36,7 @@ pub(super) fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineIn
         }
 
         // Second must be setCC
-        if !matches!(infos[seq_indices[1]].kind, LineKind::SetCC { .. }) {
+        if !matches!(infos[seq_indices[1]].kind, LineKind::SetCC { reg: 0 }) {
             i += 1;
             continue;
         }
@@ -52,13 +52,14 @@ pub(super) fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineIn
         let mut test_idx = None;
         let mut store_offsets: [i32; MAX_TRACKED_STORE_LOAD_OFFSETS] = [0; MAX_TRACKED_STORE_LOAD_OFFSETS];
         let mut store_count = 0usize;
+        let mut rax_reload_offset: Option<i32> = None;
         let mut scan = 2;
         while scan < seq_count {
             let si = seq_indices[scan];
             let line = infos[si].trimmed(store.get(si));
 
             // Skip zero-extend of setcc result
-            if line.starts_with("movzbq %al,") || line.starts_with("movzbl %al,") {
+            if line == "movzbq %al, %rax" || line == "movzbl %al, %eax" {
                 scan += 1;
                 continue;
             }
@@ -74,12 +75,33 @@ pub(super) fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineIn
                 scan += 1;
                 continue;
             }
-            if matches!(infos[si].kind, LineKind::LoadRbp { .. }) {
+            if let LineKind::LoadRbp { reg, offset, .. } = infos[si].kind {
+                // Loads into %rax clobber the materialized setcc value.
+                // Allow only a true spill+reload of that same value.
+                if reg == 0 {
+                    if store_count == 0 {
+                        store_count = usize::MAX;
+                        break;
+                    }
+                    let matches_store = (0..store_count).any(|k| store_offsets[k] == offset);
+                    if !matches_store {
+                        store_count = usize::MAX;
+                        break;
+                    }
+                    if let Some(prev) = rax_reload_offset {
+                        if prev != offset {
+                            store_count = usize::MAX;
+                            break;
+                        }
+                    } else {
+                        rax_reload_offset = Some(offset);
+                    }
+                }
                 scan += 1;
                 continue;
             }
             // Skip cltq and movslq
-            if line == "cltq" || line.starts_with("movslq ") {
+            if line == "cltq" || line == "movslq %eax, %rax" {
                 scan += 1;
                 continue;
             }
