@@ -23,6 +23,8 @@ def run_cmd(
         cmd,
         cwd=cwd,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
         timeout=timeout,
@@ -68,6 +70,26 @@ def resolve_cmd_path(cmd: list[str], base_dir: Path) -> list[str]:
         cmd = cmd.copy()
         cmd[0] = str(exe_path)
     return cmd
+
+
+def write_text_file(path: Path, text: str) -> None:
+    try:
+        path.write_text(text, encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"[WARN] Failed to write {path}: {exc}", file=sys.stderr)
+
+
+def allocate_case_dir(work_root: Path, start_iteration: int) -> tuple[int, Path]:
+    iteration = start_iteration
+    while True:
+        iteration += 1
+        case_dir = work_root / f"case_{iteration:08d}"
+        try:
+            case_dir.mkdir(parents=True, exist_ok=False)
+            return iteration, case_dir
+        except FileExistsError:
+            # Another run may already be using this id; skip and keep going.
+            continue
 
 
 def main() -> int:
@@ -123,6 +145,9 @@ def main() -> int:
         help="Keep artifacts for passing iterations (default: delete them)",
     )
     args = parser.parse_args()
+    if args.progress_every <= 0:
+        print("ERROR: --progress-every must be >= 1", file=sys.stderr)
+        return 2
 
     root = Path.cwd()
     yarpgen = Path(args.yarpgen).expanduser()
@@ -147,15 +172,11 @@ def main() -> int:
     print("Starting infinite differential loop. Press Ctrl-C to stop.")
 
     iteration = 0
-    while (work_root / f"case_{iteration + 1:08d}").exists():
-        iteration += 1
     start_time = time.time()
 
     try:
         while True:
-            iteration += 1
-            case_dir = work_root / f"case_{iteration:08d}"
-            case_dir.mkdir(parents=True, exist_ok=False)
+            iteration, case_dir = allocate_case_dir(work_root, iteration)
 
             # 1) Generate C99 test with yarpgen.
             try:
@@ -169,9 +190,13 @@ def main() -> int:
                 print(f"[FAIL] Iteration {iteration}: yarpgen timed out")
                 print(f"Case kept at: {case_dir}")
                 return 1
+            except OSError as exc:
+                print(f"[FAIL] Iteration {iteration}: yarpgen launch failed: {exc}")
+                print(f"Case kept at: {case_dir}")
+                return 1
 
             seed = parse_seed(gen.stdout)
-            (case_dir / "yarpgen.log").write_text(gen.stdout, encoding="utf-8")
+            write_text_file(case_dir / "yarpgen.log", gen.stdout)
 
             if gen.returncode != 0:
                 print(f"[FAIL] Iteration {iteration}: yarpgen failed ({seed})")
@@ -193,13 +218,14 @@ def main() -> int:
                     print(f"[FAIL] Iteration {iteration}: {name} compile timeout ({seed})")
                     print(f"Case kept at: {case_dir}")
                     return 1
+                except OSError as exc:
+                    print(f"[FAIL] Iteration {iteration}: {name} compile launch failed ({seed})")
+                    print(f"Case kept at: {case_dir}")
+                    print(f"{name} launch error: {exc}")
+                    return 1
 
-                (case_dir / f"compile_{name}.stdout").write_text(
-                    cp.stdout, encoding="utf-8"
-                )
-                (case_dir / f"compile_{name}.stderr").write_text(
-                    cp.stderr, encoding="utf-8"
-                )
+                write_text_file(case_dir / f"compile_{name}.stdout", cp.stdout)
+                write_text_file(case_dir / f"compile_{name}.stderr", cp.stderr)
 
                 if cp.returncode != 0:
                     print(f"[FAIL] Iteration {iteration}: {name} compile failed ({seed})")
@@ -216,10 +242,15 @@ def main() -> int:
                     print(f"[FAIL] Iteration {iteration}: {name} runtime timeout ({seed})")
                     print(f"Case kept at: {case_dir}")
                     return 1
+                except OSError as exc:
+                    print(f"[FAIL] Iteration {iteration}: {name} runtime launch failed ({seed})")
+                    print(f"Case kept at: {case_dir}")
+                    print(f"{name} launch error: {exc}")
+                    return 1
 
                 results[name] = (rp.returncode, rp.stdout, rp.stderr)
-                (case_dir / f"run_{name}.stdout").write_text(rp.stdout, encoding="utf-8")
-                (case_dir / f"run_{name}.stderr").write_text(rp.stderr, encoding="utf-8")
+                write_text_file(case_dir / f"run_{name}.stdout", rp.stdout)
+                write_text_file(case_dir / f"run_{name}.stderr", rp.stderr)
 
             baseline = results["clang"]
             mismatch = (
@@ -244,7 +275,7 @@ def main() -> int:
                 )
 
             if not args.keep_passing:
-                shutil.rmtree(case_dir)
+                shutil.rmtree(case_dir, ignore_errors=True)
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
