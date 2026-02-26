@@ -76,6 +76,20 @@ Behavior:
 
 By default, passing cases are deleted. Use `--keep-passing` only if you explicitly want all artifacts.
 
+Recommended for reliable repeated runs:
+
+```bash
+RUN_ROOT="yarpgen_cases/run_$(date +%Y%m%d_%H%M%S)"
+./yarpgen_loop.py --work-root "$RUN_ROOT"
+```
+
+Why:
+- The current driver assumes contiguous case numbering.
+- Reusing an old directory with numbering gaps can trigger `FileExistsError` mid-run.
+- A fresh per-run directory avoids collisions and makes artifacts easier to track.
+
+If you must reuse a directory, ensure it is empty first.
+
 ## 3) Start Reduction From a Mismatch Case
 
 Assume failing case directory:
@@ -259,6 +273,21 @@ diff -u final.out.clang final.out.ccc || true
   - Use `-d <dir>` for output directory.
   - `--out-dir <dir>` may fail on some builds; `--out-dir=<dir>` or `-d <dir>` is safer.
 
+- Loop driver crashes with `FileExistsError: ... case_XXXXXXXX`:
+  - Cause: non-empty/sparse `--work-root` from previous runs.
+  - Fix: run with a fresh unique `--work-root` (recommended) or clear old case dirs before starting.
+
+- Background loop management confusion (stale pidfiles / missing process):
+  - Do not trust a pidfile alone.
+  - Always verify with:
+
+  ```bash
+  ps -p "$(cat yarpgen_loop.pid)" -o pid=,stat=,etime=,cmd=
+  ```
+
+  - If no process exists, remove stale pidfile and relaunch.
+  - Prefer running in `tmux`/`screen` (or foreground) for long fuzzing sessions.
+
 - Sanitized `clang` exits due LeakSanitizer:
   - Set `ASAN_OPTIONS=detect_leaks=0`.
 
@@ -267,4 +296,3 @@ diff -u final.out.clang final.out.ccc || true
 
 - Over-reduced testcase devolves into obvious UB (e.g., bad `printf` usage):
   - Enforce warning-gate checks in `interesting.sh` as above.
-
