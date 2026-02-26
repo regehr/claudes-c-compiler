@@ -6,7 +6,15 @@ Scope:
 - Use `yarpgen` to generate C99 tests.
 - Differentially test outputs across compilers.
 - Reduce real disagreements with `cvise`.
+- Preprocess testcase before any reduction step.
 - Avoid false positives from obvious UB in reductions.
+
+## Mandatory Bug-Fix Policy
+
+For every confirmed `ccc` bug that gets fixed:
+- Add a regression test in the compiler test suite as part of the same change.
+- The test must fail with the pre-fix compiler and pass with the fix.
+- A fix is not complete until the regression test is present and passing.
 
 ## Environment Baseline
 
@@ -64,15 +72,29 @@ Interpretation:
 Use the existing loop driver in repo root:
 
 ```bash
-./yarpgen_loop.py
+python3 -u ./yarpgen_loop.py --progress-every 1
 ```
 
 Behavior:
-- Repeats forever.
+- Repeats until mismatch/failure, unless manually stopped.
 - Generates C99 test with yarpgen each iteration.
 - Builds with `clang/gcc/ccc` using `-w`.
 - Compares `(return_code, stdout, stderr)`.
 - Stops and preserves the failing case directory on mismatch.
+
+Mandatory campaign policy:
+- Keep the top-level loop running until:
+  - first bug/mismatch is found, or
+  - `iter=10000` is reached with no bug.
+- Do not stop earlier for convenience.
+
+Practical tracking pattern:
+
+```bash
+python3 -u ./yarpgen_loop.py --progress-every 1 | tee yarpgen_loop.log
+```
+
+Stop only after a mismatch/fail message or after observing `[OK] iter=10000 ...`.
 
 By default, passing cases are deleted. Use `--keep-passing` only if you explicitly want all artifacts.
 
@@ -80,15 +102,18 @@ Recommended for reliable repeated runs:
 
 ```bash
 RUN_ROOT="yarpgen_cases/run_$(date +%Y%m%d_%H%M%S)"
-./yarpgen_loop.py --work-root "$RUN_ROOT"
+python3 -u ./yarpgen_loop.py --progress-every 1 --work-root "$RUN_ROOT"
 ```
 
 Why:
-- The current driver assumes contiguous case numbering.
-- Reusing an old directory with numbering gaps can trigger `FileExistsError` mid-run.
-- A fresh per-run directory avoids collisions and makes artifacts easier to track.
+- A fresh per-run directory keeps artifacts easy to inspect.
+- It avoids confusion from old case numbering and stale artifacts.
 
-If you must reuse a directory, ensure it is empty first.
+If a run exits due compile timeout before finding a mismatch, rerun with a larger timeout:
+
+```bash
+python3 -u ./yarpgen_loop.py --progress-every 1 --compile-timeout 180
+```
 
 ## 3) Start Reduction From a Mismatch Case
 
@@ -109,39 +134,31 @@ clang -std=c99 -w driver.c func.c -o prog_clang
 diff -u out_clang.txt out_ccc.txt
 ```
 
-## 4) Build a Single-File Reproducer Before Reduction
-
-Single-file reduction is usually easier than multi-file reduction.
-
-Create merged source:
+Localize which TU is miscompiled before reduction (often only `func.c`):
 
 ```bash
-{ cat driver.c; tail -n +2 func.c; } > merged.c
+clang -std=c99 -w -O0 -c driver.c -o driver.clang.o
+clang -std=c99 -w -O0 -c func.c   -o func.clang.o
+./target/release/ccc -std=c99 -w -O0 -c driver.c -o driver.ccc.o
+./target/release/ccc -std=c99 -w -O0 -c func.c   -o func.ccc.o
+clang driver.clang.o func.ccc.o   -o mix_clangdriver_cccfunc
+clang driver.ccc.o   func.clang.o -o mix_cccdriver_clangfunc
 ```
 
-Why `tail -n +2 func.c`:
-- `func.c` starts with `#include "init.h"`.
-- `driver.c` already includes `init.h`.
-- This avoids duplicate include lines in the merged file.
+Prefer reducing the miscompiled TU only, with the other TU fixed.
 
-Re-verify mismatch on `merged.c`:
+## 4) MANDATORY: Preprocess Before Any Reduction
 
-```bash
-clang -std=c99 -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=all merged.c -o merged_clang_san
-./target/release/ccc -std=c99 -w -O0 merged.c -o merged_ccc
-ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./merged_clang_san > out_clang.txt 2>err_clang.txt
-./merged_ccc > out_ccc.txt 2>err_ccc.txt
-```
+Never run `cvise` on raw yarpgen source. Always preprocess the reduction target first.
 
-Note:
-- `ASAN_OPTIONS=detect_leaks=0` is needed in this environment because LeakSanitizer can fail under ptrace-like constraints.
-
-## 5) Preprocess Safely
-
-Preprocess:
+Examples:
 
 ```bash
+# If reducing a merged single-file testcase:
 clang -E -P -std=c99 merged.c > merged.pre.c
+
+# If reducing only func.c with fixed driver.c/init.h:
+clang -E -P -std=c99 -I . func.c > func.pre.c
 ```
 
 Important compatibility fix for `ccc`:
@@ -150,9 +167,9 @@ Important compatibility fix for `ccc`:
   - `typedef double _Float64;`
   - `typedef double _Float32x;`
   - `typedef long double _Float64x;`
-- `ccc` may treat `_Float*` as macros, causing invalid expansion like `typedef float float;`.
+- `ccc` may treat `_Float*` as macros, producing invalid `typedef float float;`.
 
-Practical fix:
+Fix:
 
 ```bash
 sed -i \
@@ -160,27 +177,23 @@ sed -i \
   -e '/^typedef double _Float64;$/d' \
   -e '/^typedef double _Float32x;$/d' \
   -e '/^typedef long double _Float64x;$/d' \
-  merged.pre.c
+  func.pre.c
 ```
 
-Then re-check mismatch exactly as above on `merged.pre.c`.
+Re-check mismatch after preprocessing. The exact numeric outputs may change after re-reduction; the signal is still `clang != ccc`.
 
-## 6) C-Vise Reduction Workflow
+## 5) C-Vise Reduction Workflow
 
-Create a clean reduction directory and copy only necessary files:
+Create a clean reduction directory and copy only required files.
+For fixed-support-file reduction, keep `driver.c`/`init.h` in the directory and reduce only `func.pre.c`.
 
-```bash
-mkdir -p yarpgen_cases/reduce_target
-cp merged.pre.c yarpgen_cases/reduce_target/
-```
-
-Create `interesting.sh` in reduction directory with these properties:
-- Compile with sanitized `clang`.
-- Compile with `ccc`.
-- Run both.
-- Require clean stderr.
-- Require output mismatch.
-- Reject bad reductions with `printf`-related UB/warnings.
+`interesting.sh` requirements:
+- Uses local candidate filename only (no args, no absolute candidate path).
+- Uses absolute paths only for fixed files/tools.
+- Compiles sanitized `clang` and `ccc`.
+- Requires clean runtime stderr.
+- Requires output mismatch.
+- Uses format-warning gate only (avoid `-Wstrict-prototypes` on yarpgen code).
 
 Template:
 
@@ -190,49 +203,76 @@ set -euo pipefail
 
 ROOT="/home/regehr/claudes-c-compiler"
 CCC="$ROOT/target/release/ccc"
-SRC="merged.pre.c"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRIVER="$SCRIPT_DIR/driver.c"
+CAND="func.pre.c"
 
 rm -f prog_clang prog_ccc out_clang.txt out_ccc.txt err_clang.txt err_ccc.txt warn.log
 
-# Reject printf-format and printf-declaration problems during reduction.
-timeout 20s clang -x c -std=c99 -fsyntax-only \
-  -Werror=incompatible-library-redeclaration \
-  -Werror=format \
-  -Werror=format-security \
-  -Werror=format-extra-args \
-  -Werror=format-insufficient-args \
-  -Werror=format-invalid-specifier \
-  "$SRC" > /dev/null 2> warn.log
+timeout 30s clang -x c -std=c99 -I "$SCRIPT_DIR" -fsyntax-only \
+  -Wno-everything \
+  -Wformat -Wformat-security -Wformat-extra-args \
+  -Wformat-insufficient-args -Wformat-invalid-specifier \
+  -Werror=format -Werror=format-security -Werror=format-extra-args \
+  -Werror=format-insufficient-args -Werror=format-invalid-specifier \
+  "$DRIVER" "$CAND" > /dev/null 2> warn.log
 
-timeout 20s clang -x c -std=c99 -w -O0 \
+timeout 30s clang -x c -std=c99 -I "$SCRIPT_DIR" -w -O0 \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
-  "$SRC" -o prog_clang
+  "$DRIVER" "$CAND" -o prog_clang
 
-timeout 20s "$CCC" -x c -std=c99 -w -O0 "$SRC" -o prog_ccc
+timeout 30s "$CCC" -x c -std=c99 -I "$SCRIPT_DIR" -w -O0 \
+  "$DRIVER" "$CAND" -o prog_ccc
 
-timeout 20s env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+timeout 30s env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./prog_clang > out_clang.txt 2> err_clang.txt
 
-timeout 20s ./prog_ccc > out_ccc.txt 2> err_ccc.txt
+timeout 30s ./prog_ccc > out_ccc.txt 2> err_ccc.txt
 
 test ! -s err_clang.txt
 test ! -s err_ccc.txt
 ! cmp -s out_clang.txt out_ccc.txt
 ```
 
-Make executable and validate before reduction:
+Validate in-place and in a temp dir before invoking `cvise`:
 
 ```bash
 chmod +x interesting.sh
 ./interesting.sh
+REDUCE_DIR="$(pwd)"
+DIR="$(mktemp -d)"
+cp func.pre.c "$DIR"
+( cd "$DIR" && "$REDUCE_DIR/interesting.sh" )
+rm -rf "$DIR"
 ```
 
-If exit code is `0`, the testcase is interesting.
-
-Run `cvise`:
+Run:
 
 ```bash
-cvise --n 8 --timeout 30 ./interesting.sh merged.pre.c
+cvise --n 8 --timeout 30 ./interesting.sh func.pre.c
+```
+
+## 6) Validate Final Reduced Case
+
+After reduction completes:
+
+```bash
+./interesting.sh
+wc -l -c func.pre.c
+cat func.pre.c
+```
+
+Also run a direct comparison:
+
+```bash
+clang -x c -std=c99 -I . -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=all \
+  driver.c func.pre.c -o final_clang
+./target/release/ccc -x c -std=c99 -I . -w -O0 \
+  driver.c func.pre.c -o final_ccc
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  ./final_clang > final.out.clang 2> final.err.clang
+./final_ccc > final.out.ccc 2> final.err.ccc
+diff -u final.out.clang final.out.ccc || true
 ```
 
 ## 7) Operational Notes for C-Vise
@@ -247,35 +287,19 @@ Standing policy:
 - Once `cvise` is running, let it run.
 - Do not interrupt unless explicitly requested.
 
-## 8) Validate Final Reduced Case
-
-After reduction completes:
-
-```bash
-./interesting.sh
-cat merged.pre.c
-wc -l -c merged.pre.c
-```
-
-Also run a direct comparison one more time:
-
-```bash
-clang -x c -std=c99 -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=all merged.pre.c -o final_clang
-./target/release/ccc -x c -std=c99 -w -O0 merged.pre.c -o final_ccc
-ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./final_clang > final.out.clang 2> final.err.clang
-./final_ccc > final.out.ccc 2> final.err.ccc
-diff -u final.out.clang final.out.ccc || true
-```
-
-## 9) Common Failure Modes and Fixes
+## 8) Common Failure Modes and Fixes
 
 - `yarpgen` option failure:
   - Use `-d <dir>` for output directory.
   - `--out-dir <dir>` may fail on some builds; `--out-dir=<dir>` or `-d <dir>` is safer.
 
-- Loop driver crashes with `FileExistsError: ... case_XXXXXXXX`:
-  - Cause: non-empty/sparse `--work-root` from previous runs.
-  - Fix: run with a fresh unique `--work-root` (recommended) or clear old case dirs before starting.
+- Loop exits early on `ccc` compile timeout:
+  - Cause: pathological generated case exceeds default compile timeout.
+  - Fix: rerun with higher timeout, e.g. `--compile-timeout 180`.
+
+- Older loop-driver versions can fail on reused case directories:
+  - Symptom: `FileExistsError: ... case_XXXXXXXX`.
+  - Fix: use a fresh `--work-root`, or update to the current hardened loop script.
 
 - Background loop management confusion (stale pidfiles / missing process):
   - Do not trust a pidfile alone.
@@ -294,5 +318,20 @@ diff -u final.out.clang final.out.ccc || true
 - Preprocessed file fails in `ccc` due `_Float*` typedef expansion:
   - Remove the four `_Float*` typedef lines shown above.
 
+- `cvise` says interestingness test does not return zero in temp dir:
+  - Cause: script is not relocatable (uses wrong candidate path or assumes cwd layout).
+  - Fix:
+    - candidate must be referenced as local filename (e.g. `func.pre.c`),
+    - fixed files must be referenced via `SCRIPT_DIR`,
+    - validate both in-place and in a temp dir before `cvise`.
+
+- Warning gate rejects original yarpgen inputs before reduction starts:
+  - Cause: using broad warning errors (`-Wstrict-prototypes`, etc.) on noisy generated code.
+  - Fix: gate only format/printf diagnostics using `-Wno-everything` plus explicit `-Wformat*` checks.
+
 - Over-reduced testcase devolves into obvious UB (e.g., bad `printf` usage):
   - Enforce warning-gate checks in `interesting.sh` as above.
+
+- Runtime sanitizers do not prove absence of all UB:
+  - Sanitizers only check executed paths.
+  - Dead-path UB may remain in reduced output; inspect reduced expressions manually when needed.
