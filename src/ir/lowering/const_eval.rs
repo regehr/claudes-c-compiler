@@ -99,7 +99,10 @@ impl Lowerer {
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
                 let promoted = shared_const_eval::promote_sub_int(val, self.is_expr_unsigned_for_const(inner));
-                const_arith::negate_const(promoted)
+                let result_ty = self.infer_expr_type(expr);
+                let result_size = result_ty.size().max(4);
+                let result_unsigned = result_ty.is_unsigned();
+                const_arith::negate_const_typed(promoted, result_size, result_unsigned)
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs);
@@ -660,4 +663,3 @@ impl Lowerer {
         }
     }
 }
-

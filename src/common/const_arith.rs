@@ -430,6 +430,42 @@ pub fn negate_const(val: IrConst) -> Option<IrConst> {
     }
 }
 
+/// Negate a constant value with explicit result-type semantics.
+///
+/// For unsigned integer results, C computes unary `-` modulo 2^N where N is the
+/// width of the result type (after integer promotions). For signed/float results,
+/// this delegates to `negate_const`.
+pub fn negate_const_typed(val: IrConst, result_size: usize, result_unsigned: bool) -> Option<IrConst> {
+    if !result_unsigned {
+        return negate_const(val);
+    }
+
+    match val {
+        IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(..) => negate_const(val),
+        IrConst::I8(_) | IrConst::I16(_) | IrConst::I32(_) | IrConst::I64(_) | IrConst::Zero => {
+            let width_bits = (result_size * 8).clamp(1, 64);
+            let mask = if width_bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width_bits) - 1
+            };
+            let v = val.to_i64()? as u64;
+            let wrapped = (0u64).wrapping_sub(v & mask) & mask;
+            Some(IrConst::I64(wrapped as i64))
+        }
+        IrConst::I128(v) => {
+            let width_bits = (result_size * 8).clamp(1, 128);
+            let mask = if width_bits == 128 {
+                u128::MAX
+            } else {
+                (1u128 << width_bits) - 1
+            };
+            let wrapped = (0u128).wrapping_sub((v as u128) & mask) & mask;
+            Some(IrConst::I128(wrapped as i128))
+        }
+    }
+}
+
 /// Bitwise NOT of a constant value (unary `~`).
 /// Sub-int types are promoted to i32 per C integer promotion rules.
 pub fn bitnot_const(val: IrConst) -> Option<IrConst> {
@@ -599,4 +635,27 @@ pub fn truncate_and_extend_bits(bits: u64, target_width: usize, target_signed: b
     };
 
     (result, target_signed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unary_neg_unsigned_u32_wraps() {
+        let result = negate_const_typed(IrConst::I64(8), 4, true).unwrap();
+        assert_eq!(result.to_u64(), Some(u32::MAX as u64 - 7));
+    }
+
+    #[test]
+    fn unary_neg_unsigned_u64_wraps() {
+        let result = negate_const_typed(IrConst::I64(8), 8, true).unwrap();
+        assert_eq!(result.to_u64(), Some(u64::MAX - 7));
+    }
+
+    #[test]
+    fn unary_neg_signed_keeps_signed_result() {
+        let result = negate_const_typed(IrConst::I32(8), 4, false).unwrap();
+        assert!(matches!(result, IrConst::I32(-8)));
+    }
 }

@@ -97,7 +97,22 @@ impl<'a> SemaConstEval<'a> {
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
                 let promoted = shared_const_eval::promote_sub_int(val, self.is_expr_unsigned(inner));
-                const_arith::negate_const(promoted)
+                let result_ctype = self.lookup_expr_type(expr)
+                    .or_else(|| self.infer_expr_ctype(expr));
+                let result_unsigned = result_ctype
+                    .as_ref()
+                    .is_some_and(|ct| ct.is_unsigned());
+                let result_size = result_ctype
+                    .as_ref()
+                    .map_or(
+                        match promoted {
+                            IrConst::I128(_) => 16,
+                            IrConst::I64(_) => 8,
+                            _ => 4,
+                        },
+                        |ct| self.ctype_size(ct).max(4),
+                    );
+                const_arith::negate_const_typed(promoted, result_size, result_unsigned)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
