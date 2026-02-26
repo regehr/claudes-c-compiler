@@ -133,11 +133,15 @@ fn elf_machine_name(em: u16) -> &'static str {
 /// Validate that all .o files in a list match the expected ELF e_machine.
 /// Returns Ok(()) if all files match or are not ELF objects (archives, shared libs, etc.).
 /// Returns Err with a diagnostic listing the mismatched files.
-fn validate_object_architectures(
-    files: impl Iterator<Item: AsRef<str>>,
+fn validate_object_architectures<I, S>(
+    files: I,
     expected_machine: u16,
     arch_name: &str,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     use std::io::Read;
     let mut mismatched = Vec::new();
 
@@ -1739,4 +1743,3 @@ pub fn escape_string(s: &str) -> String {
     }
     result
 }
-

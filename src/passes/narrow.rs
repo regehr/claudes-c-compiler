@@ -149,7 +149,6 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
     }
 
     let mut narrowed_map: Vec<Option<IrType>> = vec![None; max_id + 1];
-
     changes += narrow_binops_with_cast(func, &binop_map, &use_counts, &widen_map, &mut narrowed_map);
     changes += narrow_binops_without_cast(func, &use_counts, &widen_map, &mut narrowed_map);
     changes += narrow_cmps(func, &widen_map);
@@ -304,15 +303,26 @@ fn narrow_binops_without_cast(
 
                 let lhs_narrow_ty = operand_narrow_type(lhs, &load_type_map, widen_map, narrowed_map);
                 let rhs_narrow_ty = operand_narrow_type(rhs, &load_type_map, widen_map, narrowed_map);
+                let op_narrow_ty = if *ty == IrType::I64 { IrType::I32 } else { IrType::U32 };
 
                 let target_ty = match (lhs_narrow_ty, rhs_narrow_ty) {
-                    (Some(lt), Some(rt)) if lt == rt => lt,
-                    (Some(lt), Some(rt)) if lt.size() == rt.size() => lt,
+                    // Keep signedness aligned with the original 64-bit BinOp type.
+                    // Picking the "other" 32-bit signedness can change the value
+                    // when widened back to 64 bits (sign-extend vs zero-extend).
+                    (Some(lt), Some(rt)) if lt == rt && lt == op_narrow_ty => lt,
                     (Some(t), None) => {
-                        if try_narrow_const_operand(rhs, t).is_some() { t } else { continue; }
+                        if t == op_narrow_ty && try_narrow_const_operand(rhs, t).is_some() {
+                            t
+                        } else {
+                            continue;
+                        }
                     }
                     (None, Some(t)) => {
-                        if try_narrow_const_operand(lhs, t).is_some() { t } else { continue; }
+                        if t == op_narrow_ty && try_narrow_const_operand(lhs, t).is_some() {
+                            t
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
@@ -985,6 +995,40 @@ mod tests {
                 assert!(matches!(rhs, Operand::Const(IrConst::I32(3) | IrConst::I64(3))));
             }
             other => panic!("Expected narrowed BinOp LShr U32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_narrow_without_cast_signedness_mismatch() {
+        // Phase 5 must not narrow to U32 when the original BinOp type is I64.
+        // Doing so can change how the result is widened back to 64 bits.
+        let mut func = make_func_with_blocks(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Cast {
+                    dest: Value(1),
+                    src: Operand::Value(Value(0)),
+                    from_ty: IrType::U32,
+                    to_ty: IrType::U64,
+                },
+                Instruction::BinOp {
+                    dest: Value(2),
+                    op: IrBinOp::Xor,
+                    lhs: Operand::Value(Value(1)),
+                    rhs: Operand::Const(IrConst::I64(0)),
+                    ty: IrType::I64,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+            source_spans: Vec::new(),
+        }]);
+
+        let changes = narrow_function(&mut func);
+        assert_eq!(changes, 0, "mismatched signedness should not be narrowed");
+
+        match &func.blocks[0].instructions[1] {
+            Instruction::BinOp { ty: IrType::I64, .. } => {}
+            other => panic!("expected BinOp to remain I64, got {:?}", other),
         }
     }
 }
