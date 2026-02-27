@@ -8,6 +8,7 @@ Scope:
 - Reduce real disagreements with `cvise`.
 - Preprocess testcase before any reduction step.
 - Avoid false positives from obvious UB in reductions.
+- For sanitizer gating, ALWAYS use BOTH ASan and UBSan together (never just one).
 
 ## Mandatory Bug-Fix Policy
 
@@ -208,10 +209,20 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 `interesting.sh` requirements:
 - Uses local candidate filename only (no args, no absolute candidate path).
 - Uses absolute paths only for tools.
-- Compiles sanitized `clang`, plus `gcc`, plus `ccc`.
+- Compiles sanitized `clang` with **ASan+UBSan** and no-recover, plus `gcc`, plus `ccc`.
 - Requires clean runtime stderr for all compared binaries.
 - Requires `clang == gcc` and `clang != ccc`.
 - Uses format-warning gate only (avoid `-Wstrict-prototypes` on yarpgen code).
+
+Mandatory sanitizer policy (cannot be skipped):
+- `interesting.sh` must compile the clang baseline with
+  `-fsanitize=address,undefined -fno-sanitize-recover=all`.
+- Runtime must set:
+  - `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`
+  - `UBSAN_OPTIONS=halt_on_error=1`
+- ALWAYS use **both** ASan and UBSan together for reduction and final validation.
+- Never run with UBSan-only or ASan-only settings.
+- Any reduction run that does not enforce both sanitizers is invalid.
 
 Template:
 
@@ -309,6 +320,13 @@ diff -u final.out.clang final.out.gcc || true
 diff -u final.out.clang final.out.ccc || true
 ```
 
+Final validation rule (cannot be skipped):
+- The final clang comparison build/run must keep BOTH sanitizers enabled:
+  `-fsanitize=address,undefined -fno-sanitize-recover=all`,
+  `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`,
+  `UBSAN_OPTIONS=halt_on_error=1`.
+- A "final" testcase validated without both sanitizers is invalid.
+
 ## 7) Operational Notes for C-Vise
 
 - `cvise` uses multiprocessing manager sockets.
@@ -347,7 +365,9 @@ Standing policy:
   - Prefer running in `tmux`/`screen` (or foreground) for long fuzzing sessions.
 
 - Sanitized `clang` exits due LeakSanitizer:
-  - Set `ASAN_OPTIONS=detect_leaks=0`.
+  - Keep BOTH sanitizers enabled.
+  - Set `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` and keep
+    `UBSAN_OPTIONS=halt_on_error=1`.
 
 - Preprocessed file fails in `ccc` due `_Float*` typedef expansion:
   - Remove the four `_Float*` typedef lines shown above.
