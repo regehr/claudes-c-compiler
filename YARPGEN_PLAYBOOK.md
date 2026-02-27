@@ -85,17 +85,17 @@ Behavior:
 - Compiler compile/runtime failures (including `ccc` crashes/ICEs/timeouts) are
   **non-interesting** for this workflow: the loop must skip them and continue.
 
-Mandatory miscompile-only policy:
+Mandatory loop policy:
 - Do not stop a campaign because `ccc` crashed or timed out.
-- Keep running until a true output mismatch (`clang == gcc != ccc`) is found,
-  or until the campaign limit is reached.
+- The current loop stops on the first disagreement in
+  `(return_code, stdout, stderr)` across `clang/gcc/ccc`.
 - If you need crash artifacts for a side investigation, use `--keep-skipped`;
   otherwise skipped cases should be deleted.
 
 Mandatory campaign policy:
 - Keep the top-level loop running until:
   - first bug/mismatch is found, or
-  - `iter=10000` is reached with no bug.
+  - an observed iteration number is `>= 10000` with no bug.
 - Do not stop earlier for convenience.
 
 Practical tracking pattern:
@@ -104,7 +104,6 @@ Practical tracking pattern:
 python3 -u ./yarpgen_loop.py --progress-every 1 | tee yarpgen_loop.log
 ```
 
-Stop only after a mismatch/fail message or after observing `[OK] iter=10000 ...`.
 `[SKIP]` messages are expected and must not terminate the campaign.
 
 By default, passing cases are deleted. Use `--keep-passing` only if you explicitly want all artifacts.
@@ -120,7 +119,8 @@ Why:
 - A fresh per-run directory keeps artifacts easy to inspect.
 - It avoids confusion from old case numbering and stale artifacts.
 
-If a run exits due compile timeout before finding a mismatch, rerun with a larger timeout:
+If too many cases are skipped due compile timeout before finding a useful mismatch,
+rerun with a larger timeout:
 
 ```bash
 python3 -u ./yarpgen_loop.py --progress-every 1 --compile-timeout 180
@@ -138,8 +138,10 @@ First verify mismatch is stable:
 
 ```bash
 cd yarpgen_cases/case_XXXXXXXX
+ROOT="/home/regehr/claudes-c-compiler"
+CCC="$ROOT/target/release/ccc"
 clang -std=c99 -w driver.c func.c -o prog_clang
-./target/release/ccc -std=c99 -w driver.c func.c -o prog_ccc
+"$CCC" -std=c99 -w driver.c func.c -o prog_ccc
 ./prog_clang > out_clang.txt
 ./prog_ccc   > out_ccc.txt
 diff -u out_clang.txt out_ccc.txt
@@ -150,8 +152,8 @@ Localize which TU is miscompiled before reduction (often only `func.c`):
 ```bash
 clang -std=c99 -w -O0 -c driver.c -o driver.clang.o
 clang -std=c99 -w -O0 -c func.c   -o func.clang.o
-./target/release/ccc -std=c99 -w -O0 -c driver.c -o driver.ccc.o
-./target/release/ccc -std=c99 -w -O0 -c func.c   -o func.ccc.o
+"$CCC" -std=c99 -w -O0 -c driver.c -o driver.ccc.o
+"$CCC" -std=c99 -w -O0 -c func.c   -o func.ccc.o
 clang driver.clang.o func.ccc.o   -o mix_clangdriver_cccfunc
 clang driver.ccc.o   func.clang.o -o mix_cccdriver_clangfunc
 ```
@@ -208,11 +210,12 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 
 `interesting.sh` requirements:
 - Uses local candidate filename only (no args, no absolute candidate path).
-- Uses absolute paths only for tools.
+- Uses an absolute path for `ccc`; `clang/gcc/timeout/env` may come from `PATH`.
 - Compiles sanitized `clang` with **ASan+UBSan** and no-recover, plus `gcc`, plus `ccc`.
 - Requires clean runtime stderr for all compared binaries.
 - Requires `clang == gcc` and `clang != ccc`.
-- Uses format-warning gate only (avoid `-Wstrict-prototypes` on yarpgen code).
+- Uses a narrow warning gate (format checks plus selected prototype/redeclaration checks),
+  avoiding broad noisy gates such as `-Wstrict-prototypes`.
 
 Mandatory sanitizer policy (cannot be skipped):
 - `interesting.sh` must compile the clang baseline with
@@ -245,34 +248,33 @@ timeout 30s clang -x c -std=c99 -fsyntax-only \
   -Wformat-signedness \
   -Wincompatible-library-redeclaration \
   -Wdeprecated-non-prototype \
-  -Werror=format -Werror=format-security -Werror=format-extra-args \
-  -Werror=format-insufficient-args -Werror=format-invalid-specifier \
+  -Werror=format \
   -Werror=incompatible-library-redeclaration \
   -Werror=deprecated-non-prototype \
-  "$CAND" > /dev/null 2> warn.log
+  "$CAND" > warn.log 2>&1 || exit 1
 
 timeout 30s clang -x c -std=c99 -w -O0 \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
-  "$CAND" -o prog_clang
+  "$CAND" -o prog_clang > /dev/null 2>err_clang.txt || exit 1
 
-timeout 30s gcc -x c -std=c99 -w -O0 \
-  "$CAND" -o prog_gcc
+timeout 30s gcc -x c -std=c99 -w \
+  "$CAND" -o prog_gcc > /dev/null 2>err_gcc.txt || exit 1
 
-timeout 30s "$CCC" -x c -std=c99 -w -O0 \
-  "$CAND" -o prog_ccc
+timeout 30s "$CCC" -x c -std=c99 -w \
+  "$CAND" -o prog_ccc > /dev/null 2>err_ccc.txt || exit 1
 
-timeout 30s env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
-  ./prog_clang > out_clang.txt 2> err_clang.txt
+timeout 5s env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  ./prog_clang > out_clang.txt 2>>err_clang.txt || exit 1
 
-timeout 30s ./prog_gcc > out_gcc.txt 2> err_gcc.txt
+timeout 5s ./prog_gcc > out_gcc.txt 2>>err_gcc.txt || exit 1
 
-timeout 30s ./prog_ccc > out_ccc.txt 2> err_ccc.txt
+timeout 5s ./prog_ccc > out_ccc.txt 2>>err_ccc.txt || exit 1
 
-test ! -s err_clang.txt
-test ! -s err_gcc.txt
-test ! -s err_ccc.txt
-cmp -s out_clang.txt out_gcc.txt
-! cmp -s out_clang.txt out_ccc.txt
+[ ! -s err_clang.txt ] || exit 1
+[ ! -s err_gcc.txt ] || exit 1
+[ ! -s err_ccc.txt ] || exit 1
+cmp -s out_clang.txt out_gcc.txt || exit 1
+! cmp -s out_clang.txt out_ccc.txt || exit 1
 ```
 
 Validate in-place and in a temp dir before invoking `cvise`:
@@ -310,7 +312,9 @@ clang -x c -std=c99 -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=al
   merged.pre.c -o final_clang
 gcc -x c -std=c99 -w -O0 \
   merged.pre.c -o final_gcc
-./target/release/ccc -x c -std=c99 -w -O0 \
+ROOT="/home/regehr/claudes-c-compiler"
+CCC="$ROOT/target/release/ccc"
+"$CCC" -x c -std=c99 -w -O0 \
   merged.pre.c -o final_ccc
 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./final_clang > final.out.clang 2> final.err.clang
@@ -344,10 +348,6 @@ Standing policy:
 - `yarpgen` option failure:
   - Use `-d <dir>` for output directory.
   - `--out-dir <dir>` may fail on some builds; `--out-dir=<dir>` or `-d <dir>` is safer.
-
-- Loop exits early on `ccc` compile timeout:
-  - Cause: pathological generated case exceeds default compile timeout.
-  - Fix: rerun with higher timeout, e.g. `--compile-timeout 180`.
 
 - Older loop-driver versions can fail on reused case directories:
   - Symptom: `FileExistsError: ... case_XXXXXXXX`.
