@@ -214,8 +214,11 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 - Compiles sanitized `clang` with **ASan+UBSan** and no-recover, plus `gcc`, plus `ccc`.
 - Requires clean runtime stderr for all compared binaries.
 - Requires `clang == gcc` and `clang != ccc`.
-- Uses a narrow warning gate (format checks plus selected prototype/redeclaration checks),
-  avoiding broad noisy gates such as `-Wstrict-prototypes`.
+- Uses a narrow warning gate that includes:
+  - format checks,
+  - selected prototype/redeclaration checks, and
+  - uninitialized local read checks.
+- Avoids broad noisy gates such as `-Wstrict-prototypes`.
 
 Mandatory sanitizer policy (cannot be skipped):
 - `interesting.sh` must compile the clang baseline with
@@ -226,6 +229,14 @@ Mandatory sanitizer policy (cannot be skipped):
 - ALWAYS use **both** ASan and UBSan together for reduction and final validation.
 - Never run with UBSan-only or ASan-only settings.
 - Any reduction run that does not enforce both sanitizers is invalid.
+
+Mandatory uninitialized-read warning policy (cannot be skipped):
+- `interesting.sh` must include clang uninitialized diagnostics in the warning gate:
+  - `-O2`
+  - `-Wuninitialized -Wconditional-uninitialized`
+  - `-Werror=uninitialized -Werror=conditional-uninitialized`
+- Any reduction run that does not enforce this gate is invalid.
+- Purpose: reject UB testcases that read uninitialized automatic locals.
 
 Template:
 
@@ -241,14 +252,16 @@ rm -f prog_clang prog_gcc prog_ccc \
   out_clang.txt out_gcc.txt out_ccc.txt \
   err_clang.txt err_gcc.txt err_ccc.txt warn.log
 
-timeout 30s clang -x c -std=c99 -fsyntax-only \
+timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
   -Wno-everything \
   -Wformat -Wformat-security -Wformat-extra-args \
   -Wformat-insufficient-args -Wformat-invalid-specifier \
   -Wformat-signedness \
+  -Wuninitialized -Wconditional-uninitialized \
   -Wincompatible-library-redeclaration \
   -Wdeprecated-non-prototype \
   -Werror=format \
+  -Werror=uninitialized -Werror=conditional-uninitialized \
   -Werror=incompatible-library-redeclaration \
   -Werror=deprecated-non-prototype \
   "$CAND" > warn.log 2>&1 || exit 1
@@ -380,7 +393,15 @@ Standing policy:
 
 - Warning gate rejects original yarpgen inputs before reduction starts:
   - Cause: using broad warning errors (`-Wstrict-prototypes`, etc.) on noisy generated code.
-  - Fix: gate only format/printf diagnostics using `-Wno-everything` plus explicit `-Wformat*` checks.
+  - Fix: use `-Wno-everything` plus explicit checks for format diagnostics,
+    selected redeclaration/prototype diagnostics, and uninitialized local reads
+    (`-O2`, `-Wuninitialized`, `-Wconditional-uninitialized`).
+
+- Reduced testcase still contains uninitialized automatic local reads:
+  - Cause: warning gate omitted uninitialized diagnostics or lacked optimization.
+  - Fix: enforce the mandatory uninitialized-read gate with
+    `-O2 -Wuninitialized -Wconditional-uninitialized`
+    and corresponding `-Werror=` flags.
 
 - Over-reduced testcase devolves into obvious UB (e.g., bad `printf` usage):
   - Enforce warning-gate checks in `interesting.sh` as above.
