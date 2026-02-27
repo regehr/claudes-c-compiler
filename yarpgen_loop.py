@@ -284,7 +284,7 @@ def main() -> int:
     parser.add_argument(
         "--compile-timeout",
         type=float,
-        default=60.0,
+        default=120.0,
         help="Per-compiler compile timeout in seconds",
     )
     parser.add_argument(
