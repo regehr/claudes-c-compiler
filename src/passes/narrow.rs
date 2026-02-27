@@ -148,10 +148,14 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
         });
     }
 
+    // Track the IR type of each SSA value where known. Used to ensure that
+    // narrowing comparisons does not drop sign-changing casts.
+    let value_type_map = build_value_type_map(func, max_id);
+
     let mut narrowed_map: Vec<Option<IrType>> = vec![None; max_id + 1];
     changes += narrow_binops_with_cast(func, &binop_map, &use_counts, &widen_map, &mut narrowed_map);
     changes += narrow_binops_without_cast(func, &use_counts, &widen_map, &mut narrowed_map);
-    changes += narrow_cmps(func, &widen_map);
+    changes += narrow_cmps(func, &widen_map, &value_type_map);
 
     changes
 }
@@ -382,6 +386,7 @@ fn narrow_binops_without_cast(
 fn narrow_cmps(
     func: &mut IrFunction,
     widen_map: &[Option<CastInfo>],
+    value_type_map: &[Option<IrType>],
 ) -> usize {
     let max_id = widen_map.len() - 1;
     let mut changes = 0;
@@ -414,6 +419,14 @@ fn narrow_cmps(
                     continue;
                 };
 
+                // Comparisons of sub-int types are particularly fragile because C
+                // integer promotions route them through int-width semantics. Narrowing
+                // directly to I8/I16/U8/U16 can drop required sign-changing casts and
+                // alter ordered comparisons. Keep cmp narrowing at int-width or wider.
+                if narrow_ty.size() < 4 {
+                    continue;
+                }
+
                 let is_signed_cmp = matches!(op,
                     IrCmpOp::Slt | IrCmpOp::Sle | IrCmpOp::Sgt | IrCmpOp::Sge);
                 let is_unsigned_cmp = matches!(op,
@@ -426,14 +439,43 @@ fn narrow_cmps(
                     continue;
                 }
 
+                // The source of the removed widening cast must already carry the
+                // same signedness/width semantics as `narrow_ty`. Otherwise we
+                // would drop a required sign-changing cast, e.g.:
+                //   %a:U16; %b = Cast %a (I16->I64); Cmp Sge %b, 0
+                // Narrowing that Cmp to use `%a` compares as unsigned and is wrong.
+                let src_matches_narrow_ty = |op: &Operand| -> bool {
+                    match op {
+                        Operand::Value(v) => {
+                            let id = v.0 as usize;
+                            if id >= value_type_map.len() {
+                                true
+                            } else {
+                                // Unknown type: allow (keeps existing narrowing behavior).
+                                // Known type: must match exactly.
+                                value_type_map[id].is_none_or(|ty| ty == narrow_ty)
+                            }
+                        }
+                        Operand::Const(c) => try_narrow_const_for_cmp(c, narrow_ty).is_some(),
+                    }
+                };
+
                 let new_lhs = if let Some(info) = lhs_cast {
-                    if info.from_ty == narrow_ty { info.src } else { continue; }
+                    if info.from_ty == narrow_ty && src_matches_narrow_ty(&info.src) {
+                        info.src
+                    } else {
+                        continue;
+                    }
                 } else {
                     continue;
                 };
 
                 let new_rhs = if let Some(info) = rhs_cast {
-                    if info.from_ty == narrow_ty { info.src } else { continue; }
+                    if info.from_ty == narrow_ty && src_matches_narrow_ty(&info.src) {
+                        info.src
+                    } else {
+                        continue;
+                    }
                 } else if let Operand::Const(c) = rhs {
                     if let Some(narrow_c) = try_narrow_const_for_cmp(c, narrow_ty) {
                         Operand::Const(narrow_c)
@@ -454,6 +496,61 @@ fn narrow_cmps(
     }
 
     changes
+}
+
+/// Build a best-effort map from Value ID to IR type.
+fn build_value_type_map(func: &IrFunction, max_id: usize) -> Vec<Option<IrType>> {
+    let mut value_type_map: Vec<Option<IrType>> = vec![None; max_id + 1];
+
+    // Seed from instructions with an explicit result type.
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let (Some(dest), Some(ty)) = (inst.dest(), inst.result_type()) {
+                let id = dest.0 as usize;
+                if id <= max_id {
+                    value_type_map[id] = Some(ty);
+                }
+            }
+        }
+    }
+
+    // Propagate through Copy values until stable.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Instruction::Copy { dest, src } = inst {
+                    let src_ty = match src {
+                        Operand::Value(v) => {
+                            let id = v.0 as usize;
+                            if id <= max_id { value_type_map[id] } else { None }
+                        }
+                        Operand::Const(c) => match c {
+                            IrConst::I8(_) => Some(IrType::I8),
+                            IrConst::I16(_) => Some(IrType::I16),
+                            IrConst::I32(_) => Some(IrType::I32),
+                            IrConst::I64(_) => Some(IrType::I64),
+                            IrConst::I128(_) => Some(IrType::I128),
+                            IrConst::F32(_) => Some(IrType::F32),
+                            IrConst::F64(_) => Some(IrType::F64),
+                            IrConst::LongDouble(_, _) => Some(IrType::F128),
+                            IrConst::Zero => None,
+                        },
+                    };
+                    if let Some(src_ty) = src_ty {
+                        let dest_id = dest.0 as usize;
+                        if dest_id <= max_id && value_type_map[dest_id] != Some(src_ty) {
+                            value_type_map[dest_id] = Some(src_ty);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    value_type_map
 }
 
 /// Check whether an operand was widened from a type matching the target_ty
@@ -1029,6 +1126,46 @@ mod tests {
         match &func.blocks[0].instructions[1] {
             Instruction::BinOp { ty: IrType::I64, .. } => {}
             other => panic!("expected BinOp to remain I64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_narrow_cmp_when_widen_source_type_mismatches() {
+        // A widening cast may claim a signed source type even when its source
+        // value is known to be unsigned. Narrowing such a Cmp would drop the
+        // sign-changing cast and change semantics.
+        let mut func = make_func_with_blocks(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::ParamRef {
+                    dest: Value(1),
+                    param_idx: 0,
+                    ty: IrType::U16,
+                },
+                Instruction::Cast {
+                    dest: Value(2),
+                    src: Operand::Value(Value(1)),
+                    from_ty: IrType::I16,
+                    to_ty: IrType::I64,
+                },
+                Instruction::Cmp {
+                    dest: Value(3),
+                    op: IrCmpOp::Sge,
+                    lhs: Operand::Value(Value(2)),
+                    rhs: Operand::Const(IrConst::I64(0)),
+                    ty: IrType::I64,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(3)))),
+            source_spans: Vec::new(),
+        }]);
+
+        let changes = narrow_function(&mut func);
+        assert_eq!(changes, 0, "must not narrow cmp when source type mismatches");
+
+        match &func.blocks[0].instructions[2] {
+            Instruction::Cmp { ty: IrType::I64, lhs: Operand::Value(Value(2)), .. } => {}
+            other => panic!("expected Cmp to remain unchanged, got {:?}", other),
         }
     }
 }
