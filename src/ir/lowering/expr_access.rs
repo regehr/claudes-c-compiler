@@ -160,6 +160,11 @@ impl Lowerer {
         let src = self.lower_expr(inner);
         let mut from_ty = self.get_expr_type(inner);
         let to_ty = self.type_spec_to_ir(target_type);
+        if from_ty.is_integer() && to_ty.is_integer() {
+            // Use semantic integer typing for casts (C integer promotions/sign rules),
+            // not storage-oriented expression typing.
+            from_ty = self.infer_expr_type(inner);
+        }
 
         if let Expr::Identifier(name, _) = inner {
             if let Some(vi) = self.lookup_var_info(name) {
@@ -1434,4 +1439,3 @@ impl Lowerer {
         IrType::from_ctype(&ctype)
     }
 }
-
