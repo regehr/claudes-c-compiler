@@ -221,8 +221,13 @@ timeout 30s clang -x c -std=c99 -fsyntax-only \
   -Wno-everything \
   -Wformat -Wformat-security -Wformat-extra-args \
   -Wformat-insufficient-args -Wformat-invalid-specifier \
+  -Wformat-signedness \
+  -Wincompatible-library-redeclaration \
+  -Wdeprecated-non-prototype \
   -Werror=format -Werror=format-security -Werror=format-extra-args \
   -Werror=format-insufficient-args -Werror=format-invalid-specifier \
+  -Werror=incompatible-library-redeclaration \
+  -Werror=deprecated-non-prototype \
   "$CAND" > /dev/null 2> warn.log
 
 timeout 30s clang -x c -std=c99 -w -O0 \
