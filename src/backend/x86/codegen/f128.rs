@@ -401,7 +401,14 @@ impl X86Codegen {
     /// Dispatch on classify_cast() for non-F128 cast kinds.
     fn emit_generic_cast(&mut self, from_ty: IrType, to_ty: IrType) {
         match classify_cast(from_ty, to_ty) {
-            CastKind::Noop | CastKind::UnsignedToSignedSameSize { .. } => {}
+            CastKind::Noop => {}
+
+            CastKind::UnsignedToSignedSameSize { to_ty } => {
+                // On x86-64, values live in 64-bit registers. A same-width cast
+                // like U32->I32 must sign-extend to preserve the signed value for
+                // subsequent 64-bit signed operations (e.g., promotion to long).
+                self.emit_sign_extend_to_rax(to_ty);
+            }
 
             CastKind::FloatToSigned { from_f64 } => {
                 if from_f64 {
