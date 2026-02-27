@@ -515,7 +515,13 @@ impl Lowerer {
     /// Lower expression and cast to target type if needed.
     pub(super) fn lower_expr_with_type(&mut self, expr: &Expr, target_ty: IrType) -> Operand {
         let src = self.lower_expr(expr);
-        let src_ty = self.get_expr_type(expr);
+        let mut src_ty = self.get_expr_type(expr);
+        if src_ty.is_integer() && target_ty.is_integer() {
+            // For integer arithmetic, use the semantic inferred type so casts
+            // follow C integer promotions/sign rules even when get_expr_type()
+            // tracks a wider storage type.
+            src_ty = self.infer_expr_type(expr);
+        }
         self.emit_implicit_cast(src, src_ty, target_ty)
     }
 
