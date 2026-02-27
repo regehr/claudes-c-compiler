@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Infinite yarpgen differential tester for clang/gcc/ccc."""
+"""Infinite parallel yarpgen differential tester for clang/gcc/ccc."""
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
+import os
 import shlex
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 def run_cmd(
@@ -79,17 +83,173 @@ def write_text_file(path: Path, text: str) -> None:
         print(f"[WARN] Failed to write {path}: {exc}", file=sys.stderr)
 
 
-def allocate_case_dir(work_root: Path, start_iteration: int) -> tuple[int, Path]:
-    iteration = start_iteration
-    while True:
-        iteration += 1
-        case_dir = work_root / f"case_{iteration:08d}"
-        try:
-            case_dir.mkdir(parents=True, exist_ok=False)
-            return iteration, case_dir
-        except FileExistsError:
-            # Another run may already be using this id; skip and keep going.
+def max_existing_iteration(work_root: Path) -> int:
+    max_iteration = 0
+    for path in work_root.iterdir():
+        if not path.is_dir():
             continue
+        if not path.name.startswith("case_"):
+            continue
+        suffix = path.name[5:]
+        if len(suffix) == 8 and suffix.isdigit():
+            max_iteration = max(max_iteration, int(suffix))
+    return max_iteration
+
+
+def case_path(work_root: Path, iteration: int) -> Path:
+    return work_root / f"case_{iteration:08d}"
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    root: str
+    work_root: str
+    yarpgen: str
+    clang_cmd: list[str]
+    gcc_cmd: list[str]
+    ccc_cmd: list[str]
+    compile_timeout: float
+    run_timeout: float
+    keep_passing: bool
+    keep_skipped: bool
+
+
+def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
+    root = Path(cfg.root)
+    work_root = Path(cfg.work_root)
+    case_dir = case_path(work_root, iteration)
+    try:
+        case_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return {"status": "collision", "iteration": iteration}
+
+    def skip(reason: str, seed: str, detail: str | None = None) -> dict[str, Any]:
+        if not cfg.keep_skipped:
+            shutil.rmtree(case_dir, ignore_errors=True)
+        return {
+            "status": "skip",
+            "iteration": iteration,
+            "seed": seed,
+            "case_dir": str(case_dir),
+            "case_kept": cfg.keep_skipped,
+            "reason": reason,
+            "detail": detail,
+        }
+
+    def fail(reason: str, seed: str = "<unknown-seed>", detail: str | None = None) -> dict[str, Any]:
+        return {
+            "status": "fail",
+            "iteration": iteration,
+            "seed": seed,
+            "case_dir": str(case_dir),
+            "reason": reason,
+            "detail": detail,
+        }
+
+    try:
+        gen = run_cmd(
+            [cfg.yarpgen, "--std=c99", "-d", str(case_dir)],
+            cwd=root,
+            timeout=cfg.compile_timeout,
+            merge_stderr=True,
+        )
+    except subprocess.TimeoutExpired:
+        return fail("yarpgen timed out")
+    except OSError as exc:
+        return fail("yarpgen launch failed", detail=f"yarpgen launch error: {exc}")
+
+    write_text_file(case_dir / "yarpgen.log", gen.stdout)
+    seed = parse_seed(gen.stdout)
+    if gen.returncode != 0:
+        return fail("yarpgen failed", seed=seed)
+
+    compilers = [
+        ("clang", cfg.clang_cmd, "prog_clang"),
+        ("gcc", cfg.gcc_cmd, "prog_gcc"),
+        ("ccc", cfg.ccc_cmd, "prog_ccc"),
+    ]
+
+    for name, cmd, out_name in compilers:
+        full_cmd = cmd + ["-std=c99", "-w", "driver.c", "func.c", "-o", out_name]
+        try:
+            cp = run_cmd(full_cmd, cwd=case_dir, timeout=cfg.compile_timeout)
+        except subprocess.TimeoutExpired:
+            return skip(f"{name} compile timeout", seed=seed)
+        except OSError as exc:
+            return skip(
+                f"{name} compile launch failed",
+                seed=seed,
+                detail=f"{name} launch error: {exc}",
+            )
+
+        cp_stdout = cp.stdout or ""
+        cp_stderr = cp.stderr or ""
+        write_text_file(case_dir / f"compile_{name}.stdout", cp_stdout)
+        write_text_file(case_dir / f"compile_{name}.stderr", cp_stderr)
+
+        if cp.returncode != 0:
+            return skip(
+                f"{name} compile failed",
+                seed=seed,
+                detail=f"{name} stderr: {short_text(cp_stderr)}",
+            )
+
+    results: dict[str, tuple[int, str, str]] = {}
+    for name, _, exe in compilers:
+        try:
+            rp = run_cmd([f"./{exe}"], cwd=case_dir, timeout=cfg.run_timeout)
+        except subprocess.TimeoutExpired:
+            return skip(f"{name} runtime timeout", seed=seed)
+        except OSError as exc:
+            return skip(
+                f"{name} runtime launch failed",
+                seed=seed,
+                detail=f"{name} launch error: {exc}",
+            )
+
+        rp_stdout = rp.stdout or ""
+        rp_stderr = rp.stderr or ""
+        results[name] = (rp.returncode, rp_stdout, rp_stderr)
+        write_text_file(case_dir / f"run_{name}.stdout", rp_stdout)
+        write_text_file(case_dir / f"run_{name}.stderr", rp_stderr)
+
+    baseline = results["clang"]
+    mismatch = results["gcc"] != baseline or results["ccc"] != baseline
+    if mismatch:
+        summaries: dict[str, tuple[int, str, str]] = {}
+        for name in ("clang", "gcc", "ccc"):
+            rc, out, err = results[name]
+            summaries[name] = (rc, short_text(out), short_text(err))
+        return {
+            "status": "mismatch",
+            "iteration": iteration,
+            "seed": seed,
+            "case_dir": str(case_dir),
+            "summaries": summaries,
+        }
+
+    out_hash = hashlib.sha256(baseline[1].encode("utf-8")).hexdigest()[:16]
+    if not cfg.keep_passing:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+    return {
+        "status": "ok",
+        "iteration": iteration,
+        "seed": seed,
+        "stdout_hash": out_hash,
+    }
+
+
+def submit_iteration(
+    executor: concurrent.futures.Executor,
+    futures: dict[concurrent.futures.Future[dict[str, Any]], int],
+    cfg: WorkerConfig,
+    iteration: int,
+) -> int:
+    next_iteration = iteration + 1
+    fut = executor.submit(run_iteration, cfg, next_iteration)
+    futures[fut] = next_iteration
+    return next_iteration
 
 
 def main() -> int:
@@ -140,6 +300,12 @@ def main() -> int:
         help="Print progress every N successful iterations",
     )
     parser.add_argument(
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Number of concurrent test cases (default: all cores)",
+    )
+    parser.add_argument(
         "--keep-passing",
         action="store_true",
         help="Keep artifacts for passing iterations (default: delete them)",
@@ -152,6 +318,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.progress_every <= 0:
         print("ERROR: --progress-every must be >= 1", file=sys.stderr)
+        return 2
+    if args.jobs <= 0:
+        print("ERROR: --jobs must be >= 1", file=sys.stderr)
         return 2
 
     root = Path.cwd()
@@ -169,159 +338,121 @@ def main() -> int:
         print(f"ERROR: yarpgen not found at {yarpgen}", file=sys.stderr)
         return 2
 
+    cfg = WorkerConfig(
+        root=str(root),
+        work_root=str(work_root),
+        yarpgen=str(yarpgen),
+        clang_cmd=clang_cmd,
+        gcc_cmd=gcc_cmd,
+        ccc_cmd=ccc_cmd,
+        compile_timeout=args.compile_timeout,
+        run_timeout=args.run_timeout,
+        keep_passing=args.keep_passing,
+        keep_skipped=args.keep_skipped,
+    )
+
     print(f"Using yarpgen: {yarpgen}")
     print(f"Using clang:   {' '.join(clang_cmd)}")
     print(f"Using gcc:     {' '.join(gcc_cmd)}")
     print(f"Using ccc:     {' '.join(ccc_cmd)}")
+    print(f"Parallel jobs: {args.jobs}")
     print(f"Artifacts dir: {work_root}")
     print("Starting infinite differential loop. Press Ctrl-C to stop.")
 
-    iteration = 0
+    iteration = max_existing_iteration(work_root)
     ok_cases = 0
     skipped_cases = 0
     start_time = time.time()
 
+    executor: concurrent.futures.Executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=args.jobs
+    )
+    futures: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
+
+    for _ in range(args.jobs):
+        iteration = submit_iteration(executor, futures, cfg, iteration)
+
     try:
         while True:
-            iteration, case_dir = allocate_case_dir(work_root, iteration)
-
-            # 1) Generate C99 test with yarpgen.
-            try:
-                gen = run_cmd(
-                    [str(yarpgen), "--std=c99", "-d", str(case_dir)],
-                    cwd=root,
-                    timeout=args.compile_timeout,
-                    merge_stderr=True,
-                )
-            except subprocess.TimeoutExpired:
-                print(f"[FAIL] Iteration {iteration}: yarpgen timed out")
-                print(f"Case kept at: {case_dir}")
-                return 1
-            except OSError as exc:
-                print(f"[FAIL] Iteration {iteration}: yarpgen launch failed: {exc}")
-                print(f"Case kept at: {case_dir}")
-                return 1
-
-            seed = parse_seed(gen.stdout)
-            write_text_file(case_dir / "yarpgen.log", gen.stdout)
-
-            if gen.returncode != 0:
-                print(f"[FAIL] Iteration {iteration}: yarpgen failed ({seed})")
-                print(f"Case kept at: {case_dir}")
-                return 1
-
-            # 2) Compile with clang/gcc/ccc using -w.
-            compilers = [
-                ("clang", clang_cmd, "prog_clang"),
-                ("gcc", gcc_cmd, "prog_gcc"),
-                ("ccc", ccc_cmd, "prog_ccc"),
-            ]
-
-            compile_failed = False
-            for name, cmd, out_name in compilers:
-                full_cmd = cmd + ["-std=c99", "-w", "driver.c", "func.c", "-o", out_name]
-                try:
-                    cp = run_cmd(full_cmd, cwd=case_dir, timeout=args.compile_timeout)
-                except subprocess.TimeoutExpired:
-                    skipped_cases += 1
-                    print(f"[SKIP] Iteration {iteration}: {name} compile timeout ({seed})")
-                    if args.keep_skipped:
-                        print(f"Case kept at: {case_dir}")
-                    else:
-                        shutil.rmtree(case_dir, ignore_errors=True)
-                    compile_failed = True
-                    break
-                except OSError as exc:
-                    skipped_cases += 1
-                    print(f"[SKIP] Iteration {iteration}: {name} compile launch failed ({seed})")
-                    print(f"{name} launch error: {exc}")
-                    if args.keep_skipped:
-                        print(f"Case kept at: {case_dir}")
-                    else:
-                        shutil.rmtree(case_dir, ignore_errors=True)
-                    compile_failed = True
-                    break
-
-                write_text_file(case_dir / f"compile_{name}.stdout", cp.stdout)
-                write_text_file(case_dir / f"compile_{name}.stderr", cp.stderr)
-
-                if cp.returncode != 0:
-                    skipped_cases += 1
-                    print(f"[SKIP] Iteration {iteration}: {name} compile failed ({seed})")
-                    print(f"{name} stderr: {short_text(cp.stderr)}")
-                    if args.keep_skipped:
-                        print(f"Case kept at: {case_dir}")
-                    else:
-                        shutil.rmtree(case_dir, ignore_errors=True)
-                    compile_failed = True
-                    break
-
-            if compile_failed:
-                continue
-
-            # 3) Run all three executables and compare outputs.
-            results: dict[str, tuple[int, str, str]] = {}
-            runtime_failed = False
-            for name, _, exe in compilers:
-                try:
-                    rp = run_cmd([f"./{exe}"], cwd=case_dir, timeout=args.run_timeout)
-                except subprocess.TimeoutExpired:
-                    skipped_cases += 1
-                    print(f"[SKIP] Iteration {iteration}: {name} runtime timeout ({seed})")
-                    if args.keep_skipped:
-                        print(f"Case kept at: {case_dir}")
-                    else:
-                        shutil.rmtree(case_dir, ignore_errors=True)
-                    runtime_failed = True
-                    break
-                except OSError as exc:
-                    skipped_cases += 1
-                    print(f"[SKIP] Iteration {iteration}: {name} runtime launch failed ({seed})")
-                    print(f"{name} launch error: {exc}")
-                    if args.keep_skipped:
-                        print(f"Case kept at: {case_dir}")
-                    else:
-                        shutil.rmtree(case_dir, ignore_errors=True)
-                    runtime_failed = True
-                    break
-
-                results[name] = (rp.returncode, rp.stdout, rp.stderr)
-                write_text_file(case_dir / f"run_{name}.stdout", rp.stdout)
-                write_text_file(case_dir / f"run_{name}.stderr", rp.stderr)
-
-            if runtime_failed:
-                continue
-
-            baseline = results["clang"]
-            mismatch = (
-                results["gcc"] != baseline
-                or results["ccc"] != baseline
+            done, _ = concurrent.futures.wait(
+                list(futures.keys()),
+                return_when=concurrent.futures.FIRST_COMPLETED,
             )
-            if mismatch:
-                print(f"[MISMATCH] Iteration {iteration}: output disagreement ({seed})")
-                print(f"Case kept at: {case_dir}")
-                for name in ("clang", "gcc", "ccc"):
-                    rc, out, err = results[name]
-                    print(
-                        f"{name}: rc={rc}, stdout={short_text(out)!r}, stderr={short_text(err)!r}"
-                    )
+            for fut in done:
+                assigned_iteration = futures.pop(fut)
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    print(f"[FAIL] Iteration {assigned_iteration}: worker crashed: {exc}")
+                    return 1
+
+                status = str(result.get("status", ""))
+                if status == "collision":
+                    iteration = submit_iteration(executor, futures, cfg, iteration)
+                    continue
+
+                result_iteration = int(result.get("iteration", assigned_iteration))
+                seed = str(result.get("seed", "<unknown-seed>"))
+
+                if status == "ok":
+                    ok_cases += 1
+                    if ok_cases % args.progress_every == 0:
+                        elapsed = time.time() - start_time
+                        out_hash = str(result.get("stdout_hash", "<unknown-hash>"))
+                        print(
+                            f"[OK] iter={result_iteration} ok={ok_cases} skipped={skipped_cases} "
+                            f"elapsed={elapsed:.1f}s seed={seed} stdout_sha256={out_hash}"
+                        )
+                    iteration = submit_iteration(executor, futures, cfg, iteration)
+                    continue
+
+                if status == "skip":
+                    skipped_cases += 1
+                    reason = str(result.get("reason", "unknown skip"))
+                    print(f"[SKIP] Iteration {result_iteration}: {reason} ({seed})")
+                    detail = result.get("detail")
+                    if detail:
+                        print(str(detail))
+                    if bool(result.get("case_kept", False)):
+                        print(f"Case kept at: {result['case_dir']}")
+                    iteration = submit_iteration(executor, futures, cfg, iteration)
+                    continue
+
+                if status == "mismatch":
+                    print(f"[MISMATCH] Iteration {result_iteration}: output disagreement ({seed})")
+                    print(f"Case kept at: {result['case_dir']}")
+                    summaries = result.get("summaries", {})
+                    if isinstance(summaries, dict):
+                        for name in ("clang", "gcc", "ccc"):
+                            value = summaries.get(name)
+                            if isinstance(value, tuple) and len(value) == 3:
+                                rc, out, err = value
+                                print(
+                                    f"{name}: rc={rc}, stdout={out!r}, stderr={err!r}"
+                                )
+                    return 1
+
+                if status == "fail":
+                    reason = str(result.get("reason", "unknown failure"))
+                    print(f"[FAIL] Iteration {result_iteration}: {reason}")
+                    detail = result.get("detail")
+                    if detail:
+                        print(str(detail))
+                    print(f"Case kept at: {result['case_dir']}")
+                    return 1
+
+                print(f"[FAIL] Iteration {result_iteration}: unknown worker status {status!r}")
+                if "case_dir" in result:
+                    print(f"Case kept at: {result['case_dir']}")
                 return 1
-
-            ok_cases += 1
-            if ok_cases % args.progress_every == 0:
-                elapsed = time.time() - start_time
-                out_hash = hashlib.sha256(baseline[1].encode("utf-8")).hexdigest()[:16]
-                print(
-                    f"[OK] iter={iteration} ok={ok_cases} skipped={skipped_cases} "
-                    f"elapsed={elapsed:.1f}s seed={seed} stdout_sha256={out_hash}"
-                )
-
-            if not args.keep_passing:
-                shutil.rmtree(case_dir, ignore_errors=True)
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
         return 0
+    finally:
+        for fut in list(futures.keys()):
+            fut.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":
