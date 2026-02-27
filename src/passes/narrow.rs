@@ -15,8 +15,10 @@
 //!   (the narrowing Cast %n becomes dead, removed by DCE)
 //!
 //! Phase 4 (with explicit narrowing Cast) is safe for arithmetic ops
-//! (Add, Sub, Mul, And, Or, Xor) because the Cast truncates the
+//! (Add, Sub, Mul, Or, Xor) because the Cast truncates the
 //! result, and the low bits are identical regardless of operation width.
+//! `And` is excluded: narrowing can drop a required sign-changing cast in
+//! implementation-defined signed/unsigned conversion chains.
 //! Shift narrowing is only safe when the shift count is a known constant
 //! in range for the narrowed width. Right shifts (AShr, LShr) additionally
 //! require matching extension on the LHS: AShr with sign-extended LHS, LShr
@@ -153,7 +155,14 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
     let value_type_map = build_value_type_map(func, max_id);
 
     let mut narrowed_map: Vec<Option<IrType>> = vec![None; max_id + 1];
-    changes += narrow_binops_with_cast(func, &binop_map, &use_counts, &widen_map, &mut narrowed_map);
+    changes += narrow_binops_with_cast(
+        func,
+        &binop_map,
+        &use_counts,
+        &widen_map,
+        &value_type_map,
+        &mut narrowed_map,
+    );
     changes += narrow_binops_without_cast(func, &use_counts, &widen_map, &mut narrowed_map);
     changes += narrow_cmps(func, &widen_map, &value_type_map);
 
@@ -162,7 +171,7 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
 
 /// Phase 4: Narrow BinOps that have an explicit narrowing Cast consumer.
 /// Finds `Cast(BinOp(widen(x), widen(y), I64), I64->T)` and replaces with
-/// `BinOp(x, y, T)`. Safe for Add/Sub/Mul/And/Or/Xor because the narrowing
+/// `BinOp(x, y, T)`. Safe for Add/Sub/Mul/Or/Xor because the narrowing
 /// Cast truncates the result (low bits are width-independent). Shift ops are
 /// only narrowed when the shift count is a known in-range constant for `T`.
 /// AShr is additionally safe only when LHS was sign-extended from a signed
@@ -173,6 +182,7 @@ fn narrow_binops_with_cast(
     binop_map: &[Option<BinOpDef>],
     use_counts: &[u32],
     widen_map: &[Option<CastInfo>],
+    value_type_map: &[Option<IrType>],
     narrowed_map: &mut [Option<IrType>],
 ) -> usize {
     let max_id = narrowed_map.len() - 1;
@@ -203,12 +213,18 @@ fn narrow_binops_with_cast(
                 // constant in range for the narrowed width.
                 let is_safe_op = matches!(binop_info.op,
                     IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul |
-                    IrBinOp::And | IrBinOp::Or | IrBinOp::Xor
+                    IrBinOp::Or | IrBinOp::Xor
                 );
                 let shift_count_in_range =
                     is_shift_count_in_range_for_type(&binop_info.rhs, *to_ty);
                 let is_safe_shl = binop_info.op == IrBinOp::Shl
-                    && shift_count_in_range;
+                    && shift_count_in_range
+                    // Preserve signedness semantics across widen/narrow boundaries.
+                    // Narrowing `Cast(BinOp Shl(widen(lhs), k), I64->T)` is only
+                    // safe when `lhs` was widened from the same signedness/width
+                    // as `T`; otherwise removing the 64-bit op can change whether
+                    // later uses observe sign- or zero-extension.
+                    && is_widened_from_matching_type(&binop_info.lhs, *to_ty, widen_map);
                 let is_safe_shift = if binop_info.op == IrBinOp::AShr {
                     // AShr narrowing is safe when the LHS was sign-extended
                     // from a signed type of the same size as the target.
@@ -234,6 +250,44 @@ fn narrow_binops_with_cast(
 
                 // BinOp result must only be used by this narrowing cast
                 if use_counts[src_id] != 1 {
+                    continue;
+                }
+
+                // Do not drop a required sign-changing cast when unwrapping a
+                // widening operand. If `%w = Cast %x, A->I64` is unwrapped while
+                // narrowing to `T`, `%x` must already carry `T` semantics.
+                let widened_source_matches_target = |orig_op: &Operand, target_ty: IrType| -> bool {
+                    let Operand::Value(v) = orig_op else {
+                        return true;
+                    };
+                    let id = v.0 as usize;
+                    if id >= widen_map.len() {
+                        return true;
+                    }
+                    let Some(info) = &widen_map[id] else {
+                        return true;
+                    };
+                    let unwraps_to_target = info.from_ty == target_ty
+                        || (info.from_ty.size() == target_ty.size()
+                            && info.from_ty.is_unsigned() == target_ty.is_unsigned());
+                    if !unwraps_to_target {
+                        return true;
+                    }
+                    match &info.src {
+                        Operand::Value(src_v) => {
+                            let src_id = src_v.0 as usize;
+                            if src_id >= value_type_map.len() {
+                                true
+                            } else {
+                                value_type_map[src_id].is_none_or(|ty| ty == target_ty)
+                            }
+                        }
+                        Operand::Const(c) => try_narrow_const(c, target_ty).is_some(),
+                    }
+                };
+                if !widened_source_matches_target(&binop_info.lhs, *to_ty)
+                    || !widened_source_matches_target(&binop_info.rhs, *to_ty)
+                {
                     continue;
                 }
 
@@ -1024,6 +1078,51 @@ mod tests {
                 assert!(matches!(rhs, Operand::Const(IrConst::I32(3))));
             }
             other => panic!("Expected narrowed BinOp Shl I32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_narrow_shl_signedness_mismatch() {
+        // Narrowing Shl is unsafe when the LHS was widened from a type whose
+        // signedness does not match the narrowing target.
+        //   %1 = Cast %0, U32->I64
+        //   %2 = BinOp Shl %1, 10, I64
+        //   %3 = Cast %2, I64->I32
+        // Keeping %3 as a cast preserves the implementation-defined U32->I32
+        // conversion at the original program point.
+        let mut func = make_func_with_blocks(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Cast {
+                    dest: Value(1),
+                    src: Operand::Value(Value(0)),
+                    from_ty: IrType::U32,
+                    to_ty: IrType::I64,
+                },
+                Instruction::BinOp {
+                    dest: Value(2),
+                    op: IrBinOp::Shl,
+                    lhs: Operand::Value(Value(1)),
+                    rhs: Operand::Const(IrConst::I64(10)),
+                    ty: IrType::I64,
+                },
+                Instruction::Cast {
+                    dest: Value(3),
+                    src: Operand::Value(Value(2)),
+                    from_ty: IrType::I64,
+                    to_ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(3)))),
+            source_spans: Vec::new(),
+        }]);
+
+        let changes = narrow_function(&mut func);
+        assert_eq!(changes, 0, "Shl with signedness mismatch must not be narrowed");
+
+        match &func.blocks[0].instructions[2] {
+            Instruction::Cast { from_ty: IrType::I64, to_ty: IrType::I32, .. } => {}
+            other => panic!("Expected narrowing cast to remain, got {:?}", other),
         }
     }
 
