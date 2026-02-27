@@ -76,11 +76,20 @@ python3 -u ./yarpgen_loop.py --progress-every 1
 ```
 
 Behavior:
-- Repeats until mismatch/failure, unless manually stopped.
+- Repeats until mismatch/manual stop, unless yarpgen itself fails.
 - Generates C99 test with yarpgen each iteration.
 - Builds with `clang/gcc/ccc` using `-w`.
 - Compares `(return_code, stdout, stderr)`.
 - Stops and preserves the failing case directory on mismatch.
+- Compiler compile/runtime failures (including `ccc` crashes/ICEs/timeouts) are
+  **non-interesting** for this workflow: the loop must skip them and continue.
+
+Mandatory miscompile-only policy:
+- Do not stop a campaign because `ccc` crashed or timed out.
+- Keep running until a true output mismatch (`clang == gcc != ccc`) is found,
+  or until the campaign limit is reached.
+- If you need crash artifacts for a side investigation, use `--keep-skipped`;
+  otherwise skipped cases should be deleted.
 
 Mandatory campaign policy:
 - Keep the top-level loop running until:
@@ -95,6 +104,7 @@ python3 -u ./yarpgen_loop.py --progress-every 1 | tee yarpgen_loop.log
 ```
 
 Stop only after a mismatch/fail message or after observing `[OK] iter=10000 ...`.
+`[SKIP]` messages are expected and must not terminate the campaign.
 
 By default, passing cases are deleted. Use `--keep-passing` only if you explicitly want all artifacts.
 

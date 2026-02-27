@@ -144,6 +144,11 @@ def main() -> int:
         action="store_true",
         help="Keep artifacts for passing iterations (default: delete them)",
     )
+    parser.add_argument(
+        "--keep-skipped",
+        action="store_true",
+        help="Keep artifacts for skipped iterations (compile/runtime failures)",
+    )
     args = parser.parse_args()
     if args.progress_every <= 0:
         print("ERROR: --progress-every must be >= 1", file=sys.stderr)
@@ -172,6 +177,8 @@ def main() -> int:
     print("Starting infinite differential loop. Press Ctrl-C to stop.")
 
     iteration = 0
+    ok_cases = 0
+    skipped_cases = 0
     start_time = time.time()
 
     try:
@@ -210,47 +217,80 @@ def main() -> int:
                 ("ccc", ccc_cmd, "prog_ccc"),
             ]
 
+            compile_failed = False
             for name, cmd, out_name in compilers:
                 full_cmd = cmd + ["-std=c99", "-w", "driver.c", "func.c", "-o", out_name]
                 try:
                     cp = run_cmd(full_cmd, cwd=case_dir, timeout=args.compile_timeout)
                 except subprocess.TimeoutExpired:
-                    print(f"[FAIL] Iteration {iteration}: {name} compile timeout ({seed})")
-                    print(f"Case kept at: {case_dir}")
-                    return 1
+                    skipped_cases += 1
+                    print(f"[SKIP] Iteration {iteration}: {name} compile timeout ({seed})")
+                    if args.keep_skipped:
+                        print(f"Case kept at: {case_dir}")
+                    else:
+                        shutil.rmtree(case_dir, ignore_errors=True)
+                    compile_failed = True
+                    break
                 except OSError as exc:
-                    print(f"[FAIL] Iteration {iteration}: {name} compile launch failed ({seed})")
-                    print(f"Case kept at: {case_dir}")
+                    skipped_cases += 1
+                    print(f"[SKIP] Iteration {iteration}: {name} compile launch failed ({seed})")
                     print(f"{name} launch error: {exc}")
-                    return 1
+                    if args.keep_skipped:
+                        print(f"Case kept at: {case_dir}")
+                    else:
+                        shutil.rmtree(case_dir, ignore_errors=True)
+                    compile_failed = True
+                    break
 
                 write_text_file(case_dir / f"compile_{name}.stdout", cp.stdout)
                 write_text_file(case_dir / f"compile_{name}.stderr", cp.stderr)
 
                 if cp.returncode != 0:
-                    print(f"[FAIL] Iteration {iteration}: {name} compile failed ({seed})")
-                    print(f"Case kept at: {case_dir}")
+                    skipped_cases += 1
+                    print(f"[SKIP] Iteration {iteration}: {name} compile failed ({seed})")
                     print(f"{name} stderr: {short_text(cp.stderr)}")
-                    return 1
+                    if args.keep_skipped:
+                        print(f"Case kept at: {case_dir}")
+                    else:
+                        shutil.rmtree(case_dir, ignore_errors=True)
+                    compile_failed = True
+                    break
+
+            if compile_failed:
+                continue
 
             # 3) Run all three executables and compare outputs.
             results: dict[str, tuple[int, str, str]] = {}
+            runtime_failed = False
             for name, _, exe in compilers:
                 try:
                     rp = run_cmd([f"./{exe}"], cwd=case_dir, timeout=args.run_timeout)
                 except subprocess.TimeoutExpired:
-                    print(f"[FAIL] Iteration {iteration}: {name} runtime timeout ({seed})")
-                    print(f"Case kept at: {case_dir}")
-                    return 1
+                    skipped_cases += 1
+                    print(f"[SKIP] Iteration {iteration}: {name} runtime timeout ({seed})")
+                    if args.keep_skipped:
+                        print(f"Case kept at: {case_dir}")
+                    else:
+                        shutil.rmtree(case_dir, ignore_errors=True)
+                    runtime_failed = True
+                    break
                 except OSError as exc:
-                    print(f"[FAIL] Iteration {iteration}: {name} runtime launch failed ({seed})")
-                    print(f"Case kept at: {case_dir}")
+                    skipped_cases += 1
+                    print(f"[SKIP] Iteration {iteration}: {name} runtime launch failed ({seed})")
                     print(f"{name} launch error: {exc}")
-                    return 1
+                    if args.keep_skipped:
+                        print(f"Case kept at: {case_dir}")
+                    else:
+                        shutil.rmtree(case_dir, ignore_errors=True)
+                    runtime_failed = True
+                    break
 
                 results[name] = (rp.returncode, rp.stdout, rp.stderr)
                 write_text_file(case_dir / f"run_{name}.stdout", rp.stdout)
                 write_text_file(case_dir / f"run_{name}.stderr", rp.stderr)
+
+            if runtime_failed:
+                continue
 
             baseline = results["clang"]
             mismatch = (
@@ -267,11 +307,13 @@ def main() -> int:
                     )
                 return 1
 
-            if iteration % args.progress_every == 0:
+            ok_cases += 1
+            if ok_cases % args.progress_every == 0:
                 elapsed = time.time() - start_time
                 out_hash = hashlib.sha256(baseline[1].encode("utf-8")).hexdigest()[:16]
                 print(
-                    f"[OK] iter={iteration} elapsed={elapsed:.1f}s seed={seed} stdout_sha256={out_hash}"
+                    f"[OK] iter={iteration} ok={ok_cases} skipped={skipped_cases} "
+                    f"elapsed={elapsed:.1f}s seed={seed} stdout_sha256={out_hash}"
                 )
 
             if not args.keep_passing:
