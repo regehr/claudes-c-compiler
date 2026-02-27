@@ -68,65 +68,7 @@ Interpretation:
 - `clang == gcc != ccc`: likely `ccc` bug.
 - `clang != gcc`: possible UB in test or toolchain/environment issue; investigate before filing.
 
-## 2) Continuous Differential Testing
-
-Use the existing loop driver in repo root:
-
-```bash
-python3 -u ./yarpgen_loop.py --progress-every 1
-```
-
-Behavior:
-- Repeats until mismatch/manual stop, unless yarpgen itself fails.
-- Generates C99 test with yarpgen each iteration.
-- Builds with `clang/gcc/ccc` using `-w`.
-- Compares `(return_code, stdout, stderr)`.
-- Stops and preserves the failing case directory on mismatch.
-- Compiler compile/runtime failures (including `ccc` crashes/ICEs/timeouts) are
-  **non-interesting** for this workflow: the loop must skip them and continue.
-
-Mandatory loop policy:
-- Do not stop a campaign because `ccc` crashed or timed out.
-- The current loop stops on the first disagreement in
-  `(return_code, stdout, stderr)` across `clang/gcc/ccc`.
-- If you need crash artifacts for a side investigation, use `--keep-skipped`;
-  otherwise skipped cases should be deleted.
-
-Mandatory campaign policy:
-- Keep the top-level loop running until:
-  - first bug/mismatch is found, or
-  - an observed iteration number is `>= 10000` with no bug.
-- Do not stop earlier for convenience.
-
-Practical tracking pattern:
-
-```bash
-python3 -u ./yarpgen_loop.py --progress-every 1 | tee yarpgen_loop.log
-```
-
-`[SKIP]` messages are expected and must not terminate the campaign.
-
-By default, passing cases are deleted. Use `--keep-passing` only if you explicitly want all artifacts.
-
-Recommended for reliable repeated runs:
-
-```bash
-RUN_ROOT="yarpgen_cases/run_$(date +%Y%m%d_%H%M%S)"
-python3 -u ./yarpgen_loop.py --progress-every 1 --work-root "$RUN_ROOT"
-```
-
-Why:
-- A fresh per-run directory keeps artifacts easy to inspect.
-- It avoids confusion from old case numbering and stale artifacts.
-
-If too many cases are skipped due compile timeout before finding a useful mismatch,
-rerun with a larger timeout:
-
-```bash
-python3 -u ./yarpgen_loop.py --progress-every 1 --compile-timeout 180
-```
-
-## 3) Start Reduction From a Mismatch Case
+## 2) Start Reduction From a Mismatch Case
 
 Assume failing case directory:
 
@@ -159,9 +101,9 @@ clang driver.ccc.o   func.clang.o -o mix_cccdriver_clangfunc
 ```
 
 Use TU localization for diagnosis only. Do **not** use multi-TU reduction inputs.
-Reduction must follow the single-file flow in Section 4.
+Reduction must follow the single-file flow in Section 3.
 
-## 4) MANDATORY: Merge To Single File And Preprocess Before Any Reduction
+## 3) MANDATORY: Merge To Single File And Preprocess Before Any Reduction
 
 Non-negotiable policy (cannot be skipped):
 - Always merge `driver.c` + `func.c` into one C input before reduction.
@@ -203,7 +145,7 @@ sed -i \
 
 Re-check mismatch after preprocessing. The exact numeric outputs may change after re-reduction; the signal is still `clang != ccc` (ideally `clang == gcc != ccc`).
 
-## 5) C-Vise Reduction Workflow
+## 4) C-Vise Reduction Workflow
 
 Create a clean reduction directory and copy only required files.
 Reduce only `merged.pre.c` (single-file, preprocessed input).
@@ -308,7 +250,7 @@ Run:
 cvise --n 8 --timeout 30 ./interesting.sh merged.pre.c
 ```
 
-## 6) Validate Final Reduced Case
+## 5) Validate Final Reduced Case
 
 After reduction completes:
 
@@ -344,7 +286,11 @@ Final validation rule (cannot be skipped):
   `UBSAN_OPTIONS=halt_on_error=1`.
 - A "final" testcase validated without both sanitizers is invalid.
 
-## 7) Operational Notes for C-Vise
+Mandatory reporting rule (cannot be skipped):
+- In the user-facing final report, always show the full final reduced testcase
+  content (`merged.pre.c`), not just size/path/output summaries.
+
+## 6) Operational Notes for C-Vise
 
 - `cvise` uses multiprocessing manager sockets.
 - In restricted/sandboxed environments this can fail with:
@@ -356,26 +302,11 @@ Standing policy:
 - Once `cvise` is running, let it run.
 - Do not interrupt unless explicitly requested.
 
-## 8) Common Failure Modes and Fixes
+## 7) Common Failure Modes and Fixes
 
 - `yarpgen` option failure:
   - Use `-d <dir>` for output directory.
   - `--out-dir <dir>` may fail on some builds; `--out-dir=<dir>` or `-d <dir>` is safer.
-
-- Older loop-driver versions can fail on reused case directories:
-  - Symptom: `FileExistsError: ... case_XXXXXXXX`.
-  - Fix: use a fresh `--work-root`, or update to the current hardened loop script.
-
-- Background loop management confusion (stale pidfiles / missing process):
-  - Do not trust a pidfile alone.
-  - Always verify with:
-
-  ```bash
-  ps -p "$(cat yarpgen_loop.pid)" -o pid=,stat=,etime=,cmd=
-  ```
-
-  - If no process exists, remove stale pidfile and relaunch.
-  - Prefer running in `tmux`/`screen` (or foreground) for long fuzzing sessions.
 
 - Sanitized `clang` exits due LeakSanitizer:
   - Keep BOTH sanitizers enabled.
