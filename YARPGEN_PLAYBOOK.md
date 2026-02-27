@@ -145,20 +145,28 @@ clang driver.clang.o func.ccc.o   -o mix_clangdriver_cccfunc
 clang driver.ccc.o   func.clang.o -o mix_cccdriver_clangfunc
 ```
 
-Prefer reducing the miscompiled TU only, with the other TU fixed.
+Use TU localization for diagnosis only. Do **not** use multi-TU reduction inputs.
+Reduction must follow the single-file flow in Section 4.
 
-## 4) MANDATORY: Preprocess Before Any Reduction
+## 4) MANDATORY: Merge To Single File And Preprocess Before Any Reduction
 
-Never run `cvise` on raw yarpgen source. Always preprocess the reduction target first.
+Non-negotiable policy (cannot be skipped):
+- Always merge `driver.c` + `func.c` into one C input before reduction.
+- Always preprocess that merged file before reduction.
+- Any reduction run that skips either step is invalid; discard it and restart.
 
-Examples:
+Never run `cvise` on raw yarpgen source and never run it on split TU inputs.
+Always reduce `merged.pre.c`.
+
+Required commands:
 
 ```bash
-# If reducing a merged single-file testcase:
-clang -E -P -std=c99 merged.c > merged.pre.c
+# Build a single TU while avoiding duplicate init.h inclusion.
+# (yarpgen init.h may not be include-guarded.)
+cp driver.c merged.c
+sed '/^#include "init.h"$/d' func.c >> merged.c
 
-# If reducing only func.c with fixed driver.c/init.h:
-clang -E -P -std=c99 -I . func.c > func.pre.c
+clang -E -P -std=c99 -I . merged.c > merged.pre.c
 ```
 
 Important compatibility fix for `ccc`:
@@ -177,22 +185,22 @@ sed -i \
   -e '/^typedef double _Float64;$/d' \
   -e '/^typedef double _Float32x;$/d' \
   -e '/^typedef long double _Float64x;$/d' \
-  func.pre.c
+  merged.pre.c
 ```
 
-Re-check mismatch after preprocessing. The exact numeric outputs may change after re-reduction; the signal is still `clang != ccc`.
+Re-check mismatch after preprocessing. The exact numeric outputs may change after re-reduction; the signal is still `clang != ccc` (ideally `clang == gcc != ccc`).
 
 ## 5) C-Vise Reduction Workflow
 
 Create a clean reduction directory and copy only required files.
-For fixed-support-file reduction, keep `driver.c`/`init.h` in the directory and reduce only `func.pre.c`.
+Reduce only `merged.pre.c` (single-file, preprocessed input).
 
 `interesting.sh` requirements:
 - Uses local candidate filename only (no args, no absolute candidate path).
-- Uses absolute paths only for fixed files/tools.
-- Compiles sanitized `clang` and `ccc`.
-- Requires clean runtime stderr.
-- Requires output mismatch.
+- Uses absolute paths only for tools.
+- Compiles sanitized `clang`, plus `gcc`, plus `ccc`.
+- Requires clean runtime stderr for all compared binaries.
+- Requires `clang == gcc` and `clang != ccc`.
 - Uses format-warning gate only (avoid `-Wstrict-prototypes` on yarpgen code).
 
 Template:
@@ -203,34 +211,41 @@ set -euo pipefail
 
 ROOT="/home/regehr/claudes-c-compiler"
 CCC="$ROOT/target/release/ccc"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DRIVER="$SCRIPT_DIR/driver.c"
-CAND="func.pre.c"
+CAND="merged.pre.c"
 
-rm -f prog_clang prog_ccc out_clang.txt out_ccc.txt err_clang.txt err_ccc.txt warn.log
+rm -f prog_clang prog_gcc prog_ccc \
+  out_clang.txt out_gcc.txt out_ccc.txt \
+  err_clang.txt err_gcc.txt err_ccc.txt warn.log
 
-timeout 30s clang -x c -std=c99 -I "$SCRIPT_DIR" -fsyntax-only \
+timeout 30s clang -x c -std=c99 -fsyntax-only \
   -Wno-everything \
   -Wformat -Wformat-security -Wformat-extra-args \
   -Wformat-insufficient-args -Wformat-invalid-specifier \
   -Werror=format -Werror=format-security -Werror=format-extra-args \
   -Werror=format-insufficient-args -Werror=format-invalid-specifier \
-  "$DRIVER" "$CAND" > /dev/null 2> warn.log
+  "$CAND" > /dev/null 2> warn.log
 
-timeout 30s clang -x c -std=c99 -I "$SCRIPT_DIR" -w -O0 \
+timeout 30s clang -x c -std=c99 -w -O0 \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
-  "$DRIVER" "$CAND" -o prog_clang
+  "$CAND" -o prog_clang
 
-timeout 30s "$CCC" -x c -std=c99 -I "$SCRIPT_DIR" -w -O0 \
-  "$DRIVER" "$CAND" -o prog_ccc
+timeout 30s gcc -x c -std=c99 -w -O0 \
+  "$CAND" -o prog_gcc
+
+timeout 30s "$CCC" -x c -std=c99 -w -O0 \
+  "$CAND" -o prog_ccc
 
 timeout 30s env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./prog_clang > out_clang.txt 2> err_clang.txt
 
+timeout 30s ./prog_gcc > out_gcc.txt 2> err_gcc.txt
+
 timeout 30s ./prog_ccc > out_ccc.txt 2> err_ccc.txt
 
 test ! -s err_clang.txt
+test ! -s err_gcc.txt
 test ! -s err_ccc.txt
+cmp -s out_clang.txt out_gcc.txt
 ! cmp -s out_clang.txt out_ccc.txt
 ```
 
@@ -241,7 +256,7 @@ chmod +x interesting.sh
 ./interesting.sh
 REDUCE_DIR="$(pwd)"
 DIR="$(mktemp -d)"
-cp func.pre.c "$DIR"
+cp merged.pre.c "$DIR"
 ( cd "$DIR" && "$REDUCE_DIR/interesting.sh" )
 rm -rf "$DIR"
 ```
@@ -249,7 +264,7 @@ rm -rf "$DIR"
 Run:
 
 ```bash
-cvise --n 8 --timeout 30 ./interesting.sh func.pre.c
+cvise --n 8 --timeout 30 ./interesting.sh merged.pre.c
 ```
 
 ## 6) Validate Final Reduced Case
@@ -258,20 +273,24 @@ After reduction completes:
 
 ```bash
 ./interesting.sh
-wc -l -c func.pre.c
-cat func.pre.c
+wc -l -c merged.pre.c
+cat merged.pre.c
 ```
 
 Also run a direct comparison:
 
 ```bash
-clang -x c -std=c99 -I . -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=all \
-  driver.c func.pre.c -o final_clang
-./target/release/ccc -x c -std=c99 -I . -w -O0 \
-  driver.c func.pre.c -o final_ccc
+clang -x c -std=c99 -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=all \
+  merged.pre.c -o final_clang
+gcc -x c -std=c99 -w -O0 \
+  merged.pre.c -o final_gcc
+./target/release/ccc -x c -std=c99 -w -O0 \
+  merged.pre.c -o final_ccc
 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./final_clang > final.out.clang 2> final.err.clang
+./final_gcc > final.out.gcc 2> final.err.gcc
 ./final_ccc > final.out.ccc 2> final.err.ccc
+diff -u final.out.clang final.out.gcc || true
 diff -u final.out.clang final.out.ccc || true
 ```
 
@@ -321,8 +340,7 @@ Standing policy:
 - `cvise` says interestingness test does not return zero in temp dir:
   - Cause: script is not relocatable (uses wrong candidate path or assumes cwd layout).
   - Fix:
-    - candidate must be referenced as local filename (e.g. `func.pre.c`),
-    - fixed files must be referenced via `SCRIPT_DIR`,
+    - candidate must be referenced as local filename (use `merged.pre.c`),
     - validate both in-place and in a temp dir before `cvise`.
 
 - Warning gate rejects original yarpgen inputs before reduction starts:
