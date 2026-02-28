@@ -83,21 +83,20 @@ def write_text_file(path: Path, text: str) -> None:
         print(f"[WARN] Failed to write {path}: {exc}", file=sys.stderr)
 
 
-def max_existing_iteration(work_root: Path) -> int:
-    max_iteration = 0
-    for path in work_root.iterdir():
-        if not path.is_dir():
-            continue
-        if not path.name.startswith("case_"):
-            continue
-        suffix = path.name[5:]
-        if len(suffix) == 8 and suffix.isdigit():
-            max_iteration = max(max_iteration, int(suffix))
-    return max_iteration
-
-
 def case_path(work_root: Path, iteration: int) -> Path:
     return work_root / f"case_{iteration:08d}"
+
+
+def make_run_root(work_root: Path) -> Path:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    base_name = f"run_{stamp}_{os.getpid()}"
+    run_root = work_root / base_name
+    suffix = 1
+    while run_root.exists():
+        run_root = work_root / f"{base_name}_{suffix:02d}"
+        suffix += 1
+    run_root.mkdir(parents=True, exist_ok=False)
+    return run_root
 
 
 @dataclass(frozen=True)
@@ -279,7 +278,7 @@ def main() -> int:
     parser.add_argument(
         "--work-root",
         default="./yarpgen_cases",
-        help="Directory used to store case artifacts",
+        help="Parent directory used to store run directories and case artifacts",
     )
     parser.add_argument(
         "--compile-timeout",
@@ -329,6 +328,7 @@ def main() -> int:
     if not work_root.is_absolute():
         work_root = root / work_root
     work_root.mkdir(parents=True, exist_ok=True)
+    run_root = make_run_root(work_root)
 
     clang_cmd = resolve_cmd_path(compiler_cmd(args.clang), root)
     gcc_cmd = resolve_cmd_path(compiler_cmd(args.gcc), root)
@@ -340,7 +340,7 @@ def main() -> int:
 
     cfg = WorkerConfig(
         root=str(root),
-        work_root=str(work_root),
+        work_root=str(run_root),
         yarpgen=str(yarpgen),
         clang_cmd=clang_cmd,
         gcc_cmd=gcc_cmd,
@@ -356,10 +356,10 @@ def main() -> int:
     print(f"Using gcc:     {' '.join(gcc_cmd)}")
     print(f"Using ccc:     {' '.join(ccc_cmd)}")
     print(f"Parallel jobs: {args.jobs}")
-    print(f"Artifacts dir: {work_root}")
+    print(f"Artifacts dir: {run_root}")
     print("Starting infinite differential loop. Press Ctrl-C to stop.")
 
-    iteration = max_existing_iteration(work_root)
+    iteration = 0
     ok_cases = 0
     skipped_cases = 0
     start_time = time.time()
