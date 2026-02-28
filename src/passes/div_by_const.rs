@@ -85,7 +85,12 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                         if id <= max_id {
                             if ty.is_unsigned() {
                                 is_known_u32[id] = true;
-                                is_known_i32[id] = true;
+                                // Unsigned 32-bit values can exceed i32::MAX.
+                                // Only narrower unsigned values are guaranteed
+                                // to fit in signed 32-bit range.
+                                if ty.size() < 4 {
+                                    is_known_i32[id] = true;
+                                }
                             } else {
                                 is_known_i32[id] = true;
                             }
@@ -100,10 +105,12 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                             && (*to_ty == IrType::I64 || *to_ty == IrType::U64)
                         {
                             if from_ty.is_unsigned() {
-                                // Zero-extension: value fits in both u32 and i32 ranges
-                                // (unsigned <=32-bit values are always non-negative and <= 2^32-1)
+                                // Zero-extension: value fits in u32 range.
+                                // Unsigned 32-bit values do NOT always fit i32.
                                 is_known_u32[id] = true;
-                                is_known_i32[id] = true;
+                                if from_ty.size() < 4 {
+                                    is_known_i32[id] = true;
+                                }
                             } else {
                                 // Sign-extension from signed type: value fits in i32 range
                                 // but NOT necessarily in u32 range (e.g. -128 sign-extended
@@ -116,8 +123,14 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                         }
                         // (b) Narrowing/truncation to <=32-bit
                         if to_ty.is_integer() && to_ty.size() <= 4 {
-                            is_known_u32[id] = true;
-                            is_known_i32[id] = true;
+                            if to_ty.is_unsigned() {
+                                is_known_u32[id] = true;
+                                if to_ty.size() < 4 {
+                                    is_known_i32[id] = true;
+                                }
+                            } else {
+                                is_known_i32[id] = true;
+                            }
                         }
                     }
                 }
@@ -126,8 +139,14 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                     if ty.is_integer() && ty.size() <= 4 {
                         let id = dest.0 as usize;
                         if id <= max_id {
-                            is_known_u32[id] = true;
-                            is_known_i32[id] = true;
+                            if ty.is_unsigned() {
+                                is_known_u32[id] = true;
+                                if ty.size() < 4 {
+                                    is_known_i32[id] = true;
+                                }
+                            } else {
+                                is_known_i32[id] = true;
+                            }
                         }
                     }
                 }
@@ -141,7 +160,9 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                             if ty.is_unsigned() || *op == IrBinOp::And || *op == IrBinOp::LShr {
                                 is_known_u32[id] = true;
                             }
-                            is_known_i32[id] = true;
+                            if ty.is_signed() || ty.size() < 4 {
+                                is_known_i32[id] = true;
+                            }
                         }
                     }
                 }
