@@ -996,9 +996,12 @@ fn resolve_value_globally(func: &IrFunction, v: Value, val_map: &FxHashMap<Value
             let result = op.eval_i64(ty.truncate_i64(l), ty.truncate_i64(r));
             Some(IrConst::I32(if result { 1 } else { 0 }))
         }
-        Instruction::Cast { src: Operand::Const(c), .. } => Some(*c),
-        Instruction::Cast { src: Operand::Value(sv), .. } => {
-            resolve_value_globally(func, *sv, val_map, depth + 1)
+        Instruction::Cast { src: Operand::Const(c), from_ty, to_ty, .. } => {
+            fold_cast_const_for_cfg(*c, *from_ty, *to_ty)
+        }
+        Instruction::Cast { src: Operand::Value(sv), from_ty, to_ty, .. } => {
+            let src_const = resolve_value_globally(func, *sv, val_map, depth + 1)?;
+            fold_cast_const_for_cfg(src_const, *from_ty, *to_ty)
         }
         Instruction::Select { cond, true_val, false_val, .. } => {
             let cond_val = resolve_operand_globally(func, cond, val_map, depth + 1)?;
@@ -1056,6 +1059,13 @@ fn resolve_value_to_const_in_block(block: &BasicBlock, v: Value) -> Option<IrCon
                 let result = op.eval_i64(ty.truncate_i64(l), ty.truncate_i64(r));
                 return Some(IrConst::I32(if result { 1 } else { 0 }));
             }
+            Instruction::Cast { dest, src: Operand::Const(c), from_ty, to_ty } if *dest == v => {
+                return fold_cast_const_for_cfg(*c, *from_ty, *to_ty);
+            }
+            Instruction::Cast { dest, src: Operand::Value(sv), from_ty, to_ty } if *dest == v => {
+                let src_const = resolve_value_to_const_in_block(block, *sv)?;
+                return fold_cast_const_for_cfg(src_const, *from_ty, *to_ty);
+            }
             Instruction::Select { dest, cond, true_val, false_val, .. } if *dest == v => {
                 let cond_const = resolve_operand_to_i64_in_block(block, cond)?;
                 let chosen = if cond_const != 0 { true_val } else { false_val };
@@ -1066,6 +1076,21 @@ fn resolve_value_to_const_in_block(block: &BasicBlock, v: Value) -> Option<IrCon
             }
             _ => {}
         }
+    }
+    None
+}
+
+/// Fold a Cast constant for branch/switch resolution in cfg_simplify.
+///
+/// We intentionally mirror integer-cast semantics used by constant_fold:
+/// normalize to source width/signedness, then truncate/extend to target.
+/// If we can't evaluate a cast safely here (e.g., non-integer source),
+/// return None so CFG simplification doesn't over-fold control flow.
+fn fold_cast_const_for_cfg(src: IrConst, from_ty: crate::common::types::IrType, to_ty: crate::common::types::IrType) -> Option<IrConst> {
+    if from_ty.is_integer() && to_ty.is_integer() {
+        let v = src.to_i64()?;
+        let casted = to_ty.truncate_i64(from_ty.truncate_i64(v));
+        return Some(IrConst::from_i64(casted, to_ty));
     }
     None
 }
@@ -1192,6 +1217,49 @@ mod tests {
         // After all passes: Block 3 is dead, intermediate blocks are merged.
         assert!(matches!(func.blocks[0].terminator, Terminator::Return(None)));
         assert_eq!(func.blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_cond_branch_cast_to_i8_must_respect_truncation() {
+        // (i8)512 == 0, so the condition is false and must branch to block 2.
+        // A buggy Cast resolver that treats Cast as identity would see 512 != 0
+        // and incorrectly fold to block 1.
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+        func.blocks.push(make_block(
+            BlockId(0),
+            vec![
+                Instruction::Copy { dest: Value(0), src: Operand::Const(IrConst::I64(512)) },
+                Instruction::Cast {
+                    dest: Value(1),
+                    src: Operand::Value(Value(0)),
+                    from_ty: IrType::I64,
+                    to_ty: IrType::I8,
+                },
+            ],
+            Terminator::CondBranch {
+                cond: Operand::Value(Value(1)),
+                true_label: BlockId(1),
+                false_label: BlockId(2),
+            },
+        ));
+        func.blocks.push(make_block(
+            BlockId(1),
+            vec![],
+            Terminator::Return(Some(Operand::Const(IrConst::I32(11)))),
+        ));
+        func.blocks.push(make_block(
+            BlockId(2),
+            vec![],
+            Terminator::Return(Some(Operand::Const(IrConst::I32(22)))),
+        ));
+
+        let count = simplify_cfg(&mut func);
+        assert!(count > 0);
+        assert_eq!(func.blocks.len(), 1);
+        assert!(matches!(
+            func.blocks[0].terminator,
+            Terminator::Return(Some(Operand::Const(IrConst::I32(22))))
+        ));
     }
 
     #[test]
