@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Infinite parallel yarpgen differential tester for clang/gcc/ccc."""
+"""Infinite parallel random-program differential tester for clang/gcc/ccc."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def run_cmd(
 def parse_seed(yarpgen_stdout: str) -> str:
     for line in yarpgen_stdout.splitlines():
         line = line.strip()
-        if "SEED" in line:
+        if "seed" in line.lower():
             return line
     return "<unknown-seed>"
 
@@ -76,6 +76,18 @@ def resolve_cmd_path(cmd: list[str], base_dir: Path) -> list[str]:
     return cmd
 
 
+def resolve_executable(exe_arg: str, base_dir: Path) -> Path | None:
+    exe_path = Path(exe_arg).expanduser()
+    if "/" in exe_arg:
+        if not exe_path.is_absolute():
+            exe_path = (base_dir / exe_path).resolve()
+        return exe_path if exe_path.exists() else None
+    resolved = shutil.which(exe_arg)
+    if resolved is None:
+        return None
+    return Path(resolved)
+
+
 def write_text_file(path: Path, text: str) -> None:
     try:
         path.write_text(text, encoding="utf-8", errors="replace")
@@ -103,7 +115,10 @@ def make_run_root(work_root: Path) -> Path:
 class WorkerConfig:
     root: str
     work_root: str
+    generator: str
     yarpgen: str
+    csmith: str
+    csmith_runtime_dirs: list[str]
     clang_cmd: list[str]
     gcc_cmd: list[str]
     ccc_cmd: list[str]
@@ -145,22 +160,55 @@ def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
             "detail": detail,
         }
 
-    try:
-        gen = run_cmd(
-            [cfg.yarpgen, "--std=c99", "-d", str(case_dir)],
-            cwd=root,
-            timeout=cfg.compile_timeout,
-            merge_stderr=True,
-        )
-    except subprocess.TimeoutExpired:
-        return fail("yarpgen timed out")
-    except OSError as exc:
-        return fail("yarpgen launch failed", detail=f"yarpgen launch error: {exc}")
+    if cfg.generator == "yarpgen":
+        try:
+            gen = run_cmd(
+                [cfg.yarpgen, "--std=c99", "-d", str(case_dir)],
+                cwd=root,
+                timeout=cfg.compile_timeout,
+                merge_stderr=True,
+            )
+        except subprocess.TimeoutExpired:
+            return fail("yarpgen timed out")
+        except OSError as exc:
+            return fail("yarpgen launch failed", detail=f"yarpgen launch error: {exc}")
 
-    write_text_file(case_dir / "yarpgen.log", gen.stdout)
-    seed = parse_seed(gen.stdout)
-    if gen.returncode != 0:
-        return fail("yarpgen failed", seed=seed)
+        write_text_file(case_dir / "yarpgen.log", gen.stdout)
+        seed = parse_seed(gen.stdout)
+        if gen.returncode != 0:
+            return fail("yarpgen failed", seed=seed)
+        sources = ["driver.c", "func.c"]
+        include_flags: list[str] = []
+
+    elif cfg.generator == "csmith":
+        try:
+            gen = run_cmd(
+                [cfg.csmith],
+                cwd=case_dir,
+                timeout=cfg.compile_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return fail("csmith timed out")
+        except OSError as exc:
+            return fail("csmith launch failed", detail=f"csmith launch error: {exc}")
+
+        csmith_stdout = gen.stdout or ""
+        csmith_stderr = gen.stderr or ""
+        write_text_file(case_dir / "generator.stdout", csmith_stdout)
+        write_text_file(case_dir / "generator.stderr", csmith_stderr)
+        seed = parse_seed(csmith_stdout + "\n" + csmith_stderr)
+        if gen.returncode != 0:
+            return fail("csmith failed", seed=seed)
+        if not csmith_stdout.strip():
+            return fail("csmith produced empty output", seed=seed)
+        write_text_file(case_dir / "test.c", csmith_stdout)
+        sources = ["test.c"]
+        include_flags = []
+        for runtime_dir in cfg.csmith_runtime_dirs:
+            include_flags.extend(["-I", runtime_dir])
+
+    else:
+        return fail(f"unknown generator {cfg.generator!r}")
 
     compilers = [
         ("clang", cfg.clang_cmd, "prog_clang"),
@@ -169,7 +217,7 @@ def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
     ]
 
     for name, cmd, out_name in compilers:
-        full_cmd = cmd + ["-std=c99", "-w", "driver.c", "func.c", "-o", out_name]
+        full_cmd = cmd + ["-std=c99", "-w"] + include_flags + sources + ["-o", out_name]
         try:
             cp = run_cmd(full_cmd, cwd=case_dir, timeout=cfg.compile_timeout)
         except subprocess.TimeoutExpired:
@@ -253,12 +301,40 @@ def submit_iteration(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate C99 programs with yarpgen and compare clang/gcc/ccc outputs forever."
+        description=(
+            "Generate random C99 programs with yarpgen/csmith and compare "
+            "clang/gcc/ccc outputs forever."
+        )
+    )
+    parser.add_argument(
+        "--generator",
+        choices=("yarpgen", "csmith"),
+        default="yarpgen",
+        help="Random program generator to use",
     )
     parser.add_argument(
         "--yarpgen",
         default="~/yarpgen/build/yarpgen",
-        help="Path to yarpgen binary",
+        help="Path to yarpgen binary (used when --generator yarpgen)",
+    )
+    parser.add_argument(
+        "--csmith",
+        default="~/csmith/build/src/csmith",
+        help="Path to csmith binary (used when --generator csmith)",
+    )
+    parser.add_argument(
+        "--generator-path",
+        default=None,
+        help="Override path to the selected generator binary",
+    )
+    parser.add_argument(
+        "--csmith-runtime-dir",
+        action="append",
+        default=[],
+        help=(
+            "Extra include directory for csmith runtime headers; can be passed "
+            "multiple times"
+        ),
     )
     parser.add_argument(
         "--clang",
@@ -323,7 +399,10 @@ def main() -> int:
         return 2
 
     root = Path.cwd()
-    yarpgen = Path(args.yarpgen).expanduser()
+    yarpgen_arg = args.generator_path or args.yarpgen
+    csmith_arg = args.generator_path or args.csmith
+    yarpgen = Path(yarpgen_arg).expanduser()
+    csmith = Path(csmith_arg).expanduser()
     work_root = Path(args.work_root).expanduser()
     if not work_root.is_absolute():
         work_root = root / work_root
@@ -334,14 +413,48 @@ def main() -> int:
     gcc_cmd = resolve_cmd_path(compiler_cmd(args.gcc), root)
     ccc_cmd = resolve_cmd_path(compiler_cmd(args.ccc), root)
 
-    if not yarpgen.exists():
-        print(f"ERROR: yarpgen not found at {yarpgen}", file=sys.stderr)
-        return 2
+    csmith_runtime_dirs: list[str] = []
+    if args.generator == "yarpgen":
+        resolved_yarpgen = resolve_executable(yarpgen_arg, root)
+        if resolved_yarpgen is None:
+            print(f"ERROR: yarpgen not found: {yarpgen_arg}", file=sys.stderr)
+            return 2
+        yarpgen = resolved_yarpgen
+    else:
+        resolved_csmith = resolve_executable(csmith_arg, root)
+        if resolved_csmith is None:
+            print(f"ERROR: csmith not found: {csmith_arg}", file=sys.stderr)
+            return 2
+        csmith = resolved_csmith
+
+        csmith_base = csmith.parent
+        auto_runtime_candidates = [
+            (csmith_base / "../../runtime").resolve(),
+            (csmith_base / "../runtime").resolve(),
+        ]
+        seen_dirs: set[str] = set()
+        for candidate in auto_runtime_candidates:
+            if candidate.is_dir():
+                candidate_str = str(candidate)
+                if candidate_str not in seen_dirs:
+                    seen_dirs.add(candidate_str)
+                    csmith_runtime_dirs.append(candidate_str)
+        for runtime_dir in args.csmith_runtime_dir:
+            runtime_path = Path(runtime_dir).expanduser()
+            if not runtime_path.is_absolute():
+                runtime_path = (root / runtime_path).resolve()
+            runtime_str = str(runtime_path)
+            if runtime_str not in seen_dirs:
+                seen_dirs.add(runtime_str)
+                csmith_runtime_dirs.append(runtime_str)
 
     cfg = WorkerConfig(
         root=str(root),
         work_root=str(run_root),
+        generator=args.generator,
         yarpgen=str(yarpgen),
+        csmith=str(csmith),
+        csmith_runtime_dirs=csmith_runtime_dirs,
         clang_cmd=clang_cmd,
         gcc_cmd=gcc_cmd,
         ccc_cmd=ccc_cmd,
@@ -351,7 +464,15 @@ def main() -> int:
         keep_skipped=args.keep_skipped,
     )
 
-    print(f"Using yarpgen: {yarpgen}")
+    print(f"Generator:     {args.generator}")
+    if args.generator == "yarpgen":
+        print(f"Using yarpgen: {yarpgen}")
+    else:
+        print(f"Using csmith:  {csmith}")
+        if csmith_runtime_dirs:
+            print(f"csmith -I dirs: {' '.join(csmith_runtime_dirs)}")
+        else:
+            print("csmith -I dirs: <none>")
     print(f"Using clang:   {' '.join(clang_cmd)}")
     print(f"Using gcc:     {' '.join(gcc_cmd)}")
     print(f"Using ccc:     {' '.join(ccc_cmd)}")
