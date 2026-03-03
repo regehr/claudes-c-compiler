@@ -91,9 +91,8 @@ impl Lowerer {
 
     /// Return the appropriate IrType for storing packed struct/union data of the given size.
     /// Small structs (≤8 bytes) passed in registers are packed into the low bytes of a
-    /// 64-bit register. We must store with the correct width to avoid overwriting memory
-    /// adjacent to the struct allocation (e.g. globals placed contiguously).
-    /// Sizes 5-7 use I64 since SysV ABI alignment ensures at least 8 bytes are allocated.
+    /// 64-bit register. This is a *carrier type* for packed scalar values, not
+    /// necessarily an exact-memory-width store type for all destinations.
     pub(super) fn packed_store_type(size: usize) -> IrType {
         match size {
             1 => IrType::I8,
@@ -1522,4 +1521,3 @@ impl Lowerer {
         }
     }
 }
-

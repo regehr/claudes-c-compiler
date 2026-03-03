@@ -524,6 +524,15 @@ impl Lowerer {
         } else {
             (false, false)
         };
+        let struct_load_size = if needs_struct_load {
+            if then_produces_packed {
+                self.struct_value_size(else_expr).unwrap_or(8)
+            } else {
+                self.struct_value_size(then_expr).unwrap_or(8)
+            }
+        } else {
+            0
+        };
         // Use target int type for loading packed small-struct data (≤8 bytes)
         let effective_ty = if needs_struct_load { crate::common::types::target_int_ir_type() } else { common_ty };
 
@@ -536,9 +545,13 @@ impl Lowerer {
                     // Address-producing branch (compound literal, deref, etc.);
                     // load the packed data to match the other packed-data branch
                     if let Operand::Value(ptr) = then_val {
-                        let loaded = s.fresh_value();
-                        s.emit(Instruction::Load { dest: loaded, ptr, ty: effective_ty, seg_override: AddressSpace::Default });
-                        Operand::Value(loaded)
+                        if effective_ty == IrType::I64 {
+                            Operand::Value(s.load_packed_struct_i64(ptr, struct_load_size))
+                        } else {
+                            let loaded = s.fresh_value();
+                            s.emit(Instruction::Load { dest: loaded, ptr, ty: effective_ty, seg_override: AddressSpace::Default });
+                            Operand::Value(loaded)
+                        }
                     } else {
                         then_val
                     }
@@ -552,9 +565,13 @@ impl Lowerer {
                     // Address-producing branch (compound literal, deref, etc.);
                     // load the packed data to match the other packed-data branch
                     if let Operand::Value(ptr) = else_val {
-                        let loaded = s.fresh_value();
-                        s.emit(Instruction::Load { dest: loaded, ptr, ty: effective_ty, seg_override: AddressSpace::Default });
-                        Operand::Value(loaded)
+                        if effective_ty == IrType::I64 {
+                            Operand::Value(s.load_packed_struct_i64(ptr, struct_load_size))
+                        } else {
+                            let loaded = s.fresh_value();
+                            s.emit(Instruction::Load { dest: loaded, ptr, ty: effective_ty, seg_override: AddressSpace::Default });
+                            Operand::Value(loaded)
+                        }
                     } else {
                         else_val
                     }

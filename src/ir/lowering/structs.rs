@@ -17,6 +17,141 @@ use crate::common::types::{AddressSpace, IrType, StructLayout, RcLayout, CType};
 use super::lower::Lowerer;
 
 impl Lowerer {
+    /// Allocation size for a temporary that stores packed small-struct data.
+    /// For odd sizes (3/5/6/7), the carrier register type is wider (I32/I64),
+    /// so reserve enough bytes to hold the full store without overrunning.
+    pub(super) fn packed_spill_alloc_size(size: usize) -> usize {
+        let size = if size == 0 { 8 } else { size };
+        size.max(Self::packed_store_type(size).size())
+    }
+
+    /// Spill packed small-struct data from a scalar/register value into a temporary
+    /// alloca and return its address.
+    pub(super) fn spill_packed_data_to_alloca(&mut self, val: Operand, size: usize, align: usize) -> Value {
+        let alloc_size = Self::packed_spill_alloc_size(size);
+        let store_ty = Self::packed_store_type(size);
+        let alloca = self.fresh_value();
+        self.emit(Instruction::Alloca {
+            dest: alloca,
+            size: alloc_size,
+            ty: store_ty,
+            align,
+            volatile: false,
+        });
+        self.emit(Instruction::Store {
+            val,
+            ptr: alloca,
+            ty: store_ty,
+            seg_override: AddressSpace::Default,
+        });
+        alloca
+    }
+
+    /// Store packed small-struct data to a destination pointer without clobbering
+    /// adjacent bytes for odd non-power-of-two sizes.
+    pub(super) fn store_packed_data_exact(&mut self, dest: Value, val: Operand, size: usize) {
+        if size == 0 {
+            return;
+        }
+        match size {
+            1 | 2 | 4 | 8 => {
+                self.emit(Instruction::Store {
+                    val,
+                    ptr: dest,
+                    ty: Self::packed_store_type(size),
+                    seg_override: AddressSpace::Default,
+                });
+            }
+            _ => {
+                let tmp = self.spill_packed_data_to_alloca(val, size, 0);
+                self.emit(Instruction::Memcpy {
+                    dest,
+                    src: tmp,
+                    size,
+                });
+            }
+        }
+    }
+
+    /// Load up to 8 bytes of struct data into an I64 carrier value.
+    /// Odd sizes are loaded via temp+memcpy to avoid out-of-bounds reads.
+    pub(super) fn load_packed_struct_i64(&mut self, src: Value, size: usize) -> Value {
+        let size = if size == 0 { 8 } else { size };
+        debug_assert!(size <= 8, "load_packed_struct_i64 expects size <= 8, got {}", size);
+
+        match size {
+            1 => {
+                let raw = self.fresh_value();
+                self.emit(Instruction::Load {
+                    dest: raw,
+                    ptr: src,
+                    ty: IrType::U8,
+                    seg_override: AddressSpace::Default,
+                });
+                self.emit_cast_val(Operand::Value(raw), IrType::U8, IrType::I64)
+            }
+            2 => {
+                let raw = self.fresh_value();
+                self.emit(Instruction::Load {
+                    dest: raw,
+                    ptr: src,
+                    ty: IrType::U16,
+                    seg_override: AddressSpace::Default,
+                });
+                self.emit_cast_val(Operand::Value(raw), IrType::U16, IrType::I64)
+            }
+            4 => {
+                let raw = self.fresh_value();
+                self.emit(Instruction::Load {
+                    dest: raw,
+                    ptr: src,
+                    ty: IrType::U32,
+                    seg_override: AddressSpace::Default,
+                });
+                self.emit_cast_val(Operand::Value(raw), IrType::U32, IrType::I64)
+            }
+            8 => {
+                let packed = self.fresh_value();
+                self.emit(Instruction::Load {
+                    dest: packed,
+                    ptr: src,
+                    ty: IrType::I64,
+                    seg_override: AddressSpace::Default,
+                });
+                packed
+            }
+            _ => {
+                let tmp = self.fresh_value();
+                self.emit(Instruction::Alloca {
+                    dest: tmp,
+                    size: 8,
+                    ty: IrType::I64,
+                    align: 0,
+                    volatile: false,
+                });
+                self.emit(Instruction::Store {
+                    val: Operand::Const(IrConst::I64(0)),
+                    ptr: tmp,
+                    ty: IrType::I64,
+                    seg_override: AddressSpace::Default,
+                });
+                self.emit(Instruction::Memcpy {
+                    dest: tmp,
+                    src,
+                    size,
+                });
+                let packed = self.fresh_value();
+                self.emit(Instruction::Load {
+                    dest: packed,
+                    ptr: tmp,
+                    ty: IrType::I64,
+                    seg_override: AddressSpace::Default,
+                });
+                packed
+            }
+        }
+    }
+
     /// Register a struct/union type definition from a TypeSpecifier, computing and
     /// caching its layout in self.types.struct_layouts. Also recursively registers any
     /// nested struct/union types defined in the fields.
@@ -482,11 +617,7 @@ impl Lowerer {
                     // Small struct (<= 8 bytes): return value in rax IS
                     // the packed struct data, not an address.
                     let val = self.lower_expr(expr);
-                    let alloca = self.fresh_value();
-                    let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    let store_ty = Self::packed_store_type(alloc_size);
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
+                    let alloca = self.spill_packed_data_to_alloca(val, struct_size, 0);
                     alloca
                 }
             }
@@ -498,11 +629,7 @@ impl Lowerer {
                     if self.expr_produces_packed_struct_data(expr) {
                         // Small struct packed in a register: spill to alloca
                         let val = self.lower_expr(expr);
-                        let alloca = self.fresh_value();
-                        let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                        let store_ty = Self::packed_store_type(alloc_size);
-                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
-                        self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty, seg_override: AddressSpace::Default });
+                        let alloca = self.spill_packed_data_to_alloca(val, struct_size, 0);
                         alloca
                     } else {
                         // Struct returned by address: copy to a fresh temporary
@@ -532,11 +659,7 @@ impl Lowerer {
                 if self.expr_produces_packed_struct_data(expr) {
                     let struct_size = self.struct_value_size(expr).unwrap_or(8);
                     let val = self.lower_expr(expr);
-                    let alloca = self.fresh_value();
-                    let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    let store_ty = Self::packed_store_type(alloc_size);
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
+                    let alloca = self.spill_packed_data_to_alloca(val, struct_size, 0);
                     alloca
                 } else {
                     let val = self.lower_expr(expr);

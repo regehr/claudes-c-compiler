@@ -197,6 +197,13 @@ impl Lowerer {
         Some(Operand::Value(packed))
     }
 
+    /// Pack a small struct (<= 8 bytes) from memory into an I64 return carrier.
+    /// Odd non-power-of-two sizes are copied through a zero-initialized temp to
+    /// avoid out-of-bounds loads from the source object.
+    fn load_small_struct_return_i64(&mut self, addr: Value, struct_size: usize) -> Value {
+        self.load_packed_struct_i64(addr, struct_size)
+    }
+
     /// Try small struct return (<= 8 bytes loaded as I64).
     /// Only used on 64-bit targets; on i686, ALL structs use sret.
     fn try_small_struct_return(&mut self, e: &Expr) -> Option<Operand> {
@@ -220,9 +227,8 @@ impl Lowerer {
             return None;
         }
         let addr = self.get_struct_base_addr(e);
-        let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty: IrType::I64 , seg_override: AddressSpace::Default });
-        Some(Operand::Value(dest))
+        let packed = self.load_small_struct_return_i64(addr, struct_size);
+        Some(Operand::Value(packed))
     }
 
     /// Try returning a complex expression from a complex-returning function.
