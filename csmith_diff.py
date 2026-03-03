@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument(
         "--run-timeout",
         type=float,
-        default=20.0,
+        default=10.0,
         help="Per-program runtime timeout in seconds.",
     )
     parser.add_argument(
