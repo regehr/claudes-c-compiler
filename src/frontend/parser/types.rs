@@ -620,9 +620,24 @@ impl Parser {
             }
             if let Some(type_spec) = self.parse_type_specifier() {
                 if matches!(self.peek(), TokenKind::Semicolon) {
-                    // Anonymous field (e.g., anonymous struct/union)
-                    let alignment = self.attrs.parsed_alignas.take();
-                    fields.push(StructFieldDecl { type_spec, name: None, bit_width: None, derived: Vec::new(), alignment, is_packed: false });
+                    // A declaration with no declarator inside a struct/union body.
+                    // Keep only anonymous struct/union members; ignore scalar forms
+                    // like `int;` (GNU extension: declaration does not declare anything).
+                    if matches!(type_spec, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..)) {
+                        let alignment = self.attrs.parsed_alignas.take();
+                        fields.push(StructFieldDecl {
+                            type_spec,
+                            name: None,
+                            bit_width: None,
+                            derived: Vec::new(),
+                            alignment,
+                            is_packed: false,
+                        });
+                    } else {
+                        // Drop parsed _Alignas from non-member declarations to avoid
+                        // leaking attribute state to subsequent fields.
+                        self.attrs.parsed_alignas.take();
+                    }
                 } else {
                     self.parse_struct_field_declarators(&type_spec, &mut fields);
                 }
