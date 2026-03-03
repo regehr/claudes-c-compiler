@@ -1090,7 +1090,11 @@ impl Lowerer {
                         }
                         Initializer::List(sub_items) => {
                             let write_offset = elem_offset + sub_byte_offset;
-                            if !sub_strides.is_empty() && sub_strides[0] > struct_size {
+                            // Recurse whenever there are still array dimensions left.
+                            // Do not require sub-stride > struct_size: dimensions like
+                            // [1] have sub-stride == struct_size and still need one
+                            // extra brace level peeled (e.g., arr[][1] = {{{...}}}).
+                            if !sub_strides.is_empty() {
                                 self.fill_multidim_struct_array_bytes(
                                     sub_items, layout, struct_size, sub_strides,
                                     bytes, write_offset, sub_strides[0],
@@ -1127,7 +1131,10 @@ impl Lowerer {
 
             match &item.init {
                 Initializer::List(sub_items) => {
-                    if this_stride > struct_size && !remaining_strides.is_empty() {
+                    // Recurse whenever we're not at the innermost dimension yet.
+                    // For inner extent 1, stride equals struct_size but brace nesting
+                    // still corresponds to a sub-array level.
+                    if !remaining_strides.is_empty() {
                         // This brace group represents a sub-array (not a single struct).
                         // Recurse with the next dimension's strides.
                         self.fill_multidim_struct_array_bytes(
