@@ -1174,6 +1174,10 @@ impl Lowerer {
                             item_idx += consumed.max(1);
                             fi += 1;
                         }
+                        // Keep array position in sync with the flat walk.
+                        // Without this, excess trailing initializers can be reprocessed
+                        // at the previous index and overwrite the last valid element.
+                        current_idx = fi;
                         // Skip the normal current_idx increment since we consumed everything
                         continue;
                     }
