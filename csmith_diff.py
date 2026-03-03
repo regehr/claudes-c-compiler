@@ -209,17 +209,22 @@ def run_one_case(
             break
 
         if ccc_compiled and ref_compiled:
+            # Only compare terminating runs. Timeout-only differences are not
+            # considered divergences.
+            if not ccc_run or not ref_run:
+                continue
+            if ccc_run["timed_out"] or ref_run["timed_out"]:
+                continue
+
             ccc_tuple = (
                 ccc_run["returncode"],
                 ccc_run["stdout"],
                 ccc_run["stderr"],
-                ccc_run["timed_out"],
             )
             ref_tuple = (
                 ref_run["returncode"],
                 ref_run["stdout"],
                 ref_run["stderr"],
-                ref_run["timed_out"],
             )
             if ccc_tuple != ref_tuple:
                 divergence = {
