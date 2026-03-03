@@ -156,10 +156,10 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 - Compiles sanitized `clang` with **ASan+UBSan** and no-recover, plus `gcc`, plus `ccc`.
 - Requires clean runtime stderr for all compared binaries.
 - Requires `clang == gcc` and `clang != ccc`.
-- Uses a narrow warning gate that includes:
+- Uses a strict dual-compiler warning gate that includes:
   - format checks,
   - selected prototype/redeclaration checks, and
-  - uninitialized local read checks.
+  - uninitialized local read checks (including aggregate/member paths).
 - Avoids broad noisy gates such as `-Wstrict-prototypes`.
 
 Mandatory sanitizer policy (cannot be skipped):
@@ -172,13 +172,21 @@ Mandatory sanitizer policy (cannot be skipped):
 - Never run with UBSan-only or ASan-only settings.
 - Any reduction run that does not enforce both sanitizers is invalid.
 
-Mandatory uninitialized-read warning policy (cannot be skipped):
-- `interesting.sh` must include clang uninitialized diagnostics in the warning gate:
-  - `-O2`
-  - `-Wuninitialized -Wconditional-uninitialized`
-  - `-Werror=uninitialized -Werror=conditional-uninitialized`
-- Any reduction run that does not enforce this gate is invalid.
-- Purpose: reject UB testcases that read uninitialized automatic locals.
+Mandatory uninitialized-read policy (ZERO TOLERANCE, cannot be skipped):
+- `interesting.sh` must enforce BOTH of the following gates:
+  - Clang warning gate:
+    - `-O2 -fsyntax-only`
+    - `-Wuninitialized -Wconditional-uninitialized`
+    - `-Werror=uninitialized -Werror=conditional-uninitialized`
+  - GCC warning gate:
+    - `-O2 -c` (not `-fsyntax-only`)
+    - `-Wuninitialized -Wmaybe-uninitialized`
+    - `-Werror=uninitialized -Werror=maybe-uninitialized`
+- `interesting.sh` must also run `clang --analyze` and reject
+  `core.uninitialized.*` findings.
+- Any reduction run that omits any one of these checks is invalid and must be discarded.
+- Rationale: Clang warning diagnostics alone can miss uninitialized reads through
+  struct/array members; GCC/analyzer backstops are required.
 
 Template:
 
@@ -192,7 +200,8 @@ CAND="merged.pre.c"
 
 rm -f prog_clang prog_gcc prog_ccc \
   out_clang.txt out_gcc.txt out_ccc.txt \
-  err_clang.txt err_gcc.txt err_ccc.txt warn.log
+  err_clang.txt err_gcc.txt err_ccc.txt \
+  warn_clang.log warn_gcc.log warn_analyze.log warn_gcc.o
 
 timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
   -Wno-everything \
@@ -206,7 +215,19 @@ timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
   -Werror=uninitialized -Werror=conditional-uninitialized \
   -Werror=incompatible-library-redeclaration \
   -Werror=deprecated-non-prototype \
-  "$CAND" > warn.log 2>&1 || exit 1
+  "$CAND" > warn_clang.log 2>&1 || exit 1
+
+timeout 30s gcc -x c -std=c99 -O2 -c \
+  -Wno-everything \
+  -Wuninitialized -Wmaybe-uninitialized \
+  -Werror=uninitialized -Werror=maybe-uninitialized \
+  "$CAND" -o warn_gcc.o > warn_gcc.log 2>&1 || exit 1
+
+timeout 30s clang -x c -std=c99 -O0 --analyze \
+  "$CAND" > warn_analyze.log 2>&1 || exit 1
+if rg -q "core\\.uninitialized\\." warn_analyze.log; then
+  exit 1
+fi
 
 timeout 30s clang -x c -std=c99 -w -O0 \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
@@ -329,10 +350,14 @@ Standing policy:
     (`-O2`, `-Wuninitialized`, `-Wconditional-uninitialized`).
 
 - Reduced testcase still contains uninitialized automatic local reads:
-  - Cause: warning gate omitted uninitialized diagnostics or lacked optimization.
-  - Fix: enforce the mandatory uninitialized-read gate with
-    `-O2 -Wuninitialized -Wconditional-uninitialized`
-    and corresponding `-Werror=` flags.
+  - Cause: only Clang warning checks were enforced.
+  - Fix: enforce the mandatory dual gate and analyzer backstop:
+    - Clang: `-O2 -fsyntax-only -Wuninitialized -Wconditional-uninitialized`
+      with corresponding `-Werror=` flags.
+    - GCC: `-O2 -c -Wuninitialized -Wmaybe-uninitialized`
+      with corresponding `-Werror=` flags.
+    - Analyzer: reject `core.uninitialized.*` from `clang --analyze`.
+  - Absolute rule: if any of these are missing, the reduction is invalid.
 
 - Over-reduced testcase devolves into obvious UB (e.g., bad `printf` usage):
   - Enforce warning-gate checks in `interesting.sh` as above.
