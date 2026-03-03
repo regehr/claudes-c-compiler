@@ -365,7 +365,12 @@ impl Lowerer {
             Initializer::Expr(expr) => {
                 if decl.is_const() && !da.is_pointer && !da.is_array && !da.is_struct && !is_complex {
                     if let Some(const_val) = self.eval_const_expr(expr) {
-                        if let Some(ival) = self.const_to_i64(&const_val) {
+                        // Track the value as it is actually stored in the const local.
+                        // Without this coercion, `const char c = 220;` is cached as 220
+                        // instead of -36 on signed-char targets, which mis-folds uses of `c`.
+                        let src_ty = self.get_expr_type(expr);
+                        let stored = self.coerce_const_to_type_with_src(const_val, da.var_ty, src_ty);
+                        if let Some(ival) = self.const_to_i64(&stored) {
                             self.insert_const_local_scoped(declarator.name.clone(), ival);
                         }
                     }
