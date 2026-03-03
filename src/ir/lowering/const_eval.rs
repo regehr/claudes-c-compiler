@@ -126,34 +126,32 @@ impl Lowerer {
                 //   x || "str"  =>  1
                 //   "str" && x  =>  bool(x) if x is evaluable, else 1 if x is also nonzero
                 //   0 && "str"  =>  0
+                let l_known_true = l.as_ref().is_some_and(|v| v.is_nonzero())
+                    || Self::expr_is_always_nonzero(lhs);
+                let l_known_false = l.as_ref().is_some_and(|v| !v.is_nonzero());
+                let r_known_true = r.as_ref().is_some_and(|v| v.is_nonzero())
+                    || Self::expr_is_always_nonzero(rhs);
+                let r_known_false = r.as_ref().is_some_and(|v| !v.is_nonzero());
+
                 if *op == BinOp::LogicalOr {
-                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(rhs);
-                    if l_nonzero || r_nonzero {
+                    // Respect short-circuit evaluation: only fold `lhs || rhs` when
+                    // lhs truthiness is known, or when lhs is known false and rhs is known.
+                    // If lhs is unknown, we must not fold from rhs alone because lhs
+                    // still has to be evaluated at runtime (it may have side effects).
+                    if l_known_true || (l_known_false && r_known_true) {
                         return Some(IrConst::I64(1));
                     }
-                    // Both are zero constants => result is 0
-                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
-                        && r.as_ref().is_some_and(|v| !v.is_nonzero())
-                    {
+                    if l_known_false && r_known_false {
                         return Some(IrConst::I64(0));
                     }
                 }
                 if *op == BinOp::LogicalAnd {
-                    // If either side is a known zero, result is 0
-                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
-                        || r.as_ref().is_some_and(|v| !v.is_nonzero())
-                    {
+                    // Respect short-circuit evaluation: only fold from rhs when lhs
+                    // is known true. If lhs is unknown, rhs cannot determine the result.
+                    if l_known_false || (l_known_true && r_known_false) {
                         return Some(IrConst::I64(0));
                     }
-                    // If both sides are known nonzero (including string literals), result is 1
-                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(rhs);
-                    if l_nonzero && r_nonzero {
+                    if l_known_true && r_known_true {
                         return Some(IrConst::I64(1));
                     }
                 }

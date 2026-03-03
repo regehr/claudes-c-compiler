@@ -180,31 +180,30 @@ impl<'a> SemaConstEval<'a> {
                 }
                 // For LogicalOr/LogicalAnd, handle string literals and other
                 // always-nonzero expressions that can't be folded to numeric values.
+                let l_known_true = l.as_ref().is_some_and(|v| v.is_nonzero())
+                    || Self::expr_is_always_nonzero(lhs);
+                let l_known_false = l.as_ref().is_some_and(|v| !v.is_nonzero());
+                let r_known_true = r.as_ref().is_some_and(|v| v.is_nonzero())
+                    || Self::expr_is_always_nonzero(rhs);
+                let r_known_false = r.as_ref().is_some_and(|v| !v.is_nonzero());
+
                 if *op == BinOp::LogicalOr {
-                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(rhs);
-                    if l_nonzero || r_nonzero {
+                    // Respect short-circuit evaluation: if lhs is unknown, rhs alone
+                    // cannot force a fold because lhs must still be evaluated.
+                    if l_known_true || (l_known_false && r_known_true) {
                         return Some(IrConst::I64(1));
                     }
-                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
-                        && r.as_ref().is_some_and(|v| !v.is_nonzero())
-                    {
+                    if l_known_false && r_known_false {
                         return Some(IrConst::I64(0));
                     }
                 }
                 if *op == BinOp::LogicalAnd {
-                    if l.as_ref().is_some_and(|v| !v.is_nonzero())
-                        || r.as_ref().is_some_and(|v| !v.is_nonzero())
-                    {
+                    // Respect short-circuit evaluation: rhs can only force a fold
+                    // when lhs truthiness is known.
+                    if l_known_false || (l_known_true && r_known_false) {
                         return Some(IrConst::I64(0));
                     }
-                    let l_nonzero = l.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(lhs);
-                    let r_nonzero = r.as_ref().is_some_and(|v| v.is_nonzero())
-                        || Self::expr_is_always_nonzero(rhs);
-                    if l_nonzero && r_nonzero {
+                    if l_known_true && r_known_true {
                         return Some(IrConst::I64(1));
                     }
                 }
