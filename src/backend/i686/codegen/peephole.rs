@@ -1248,6 +1248,8 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
         // Track StoreEbp offsets so we can bail out if any store's slot is
         // potentially read by another basic block (no matching load nearby).
         let mut test_idx = None;
+        let mut zext_scans = [0usize; CMP_FUSION_LOOKAHEAD];
+        let mut zext_count = 0usize;
         let mut store_offsets: [i32; MAX_TRACKED_STORE_LOAD_OFFSETS] = [0; MAX_TRACKED_STORE_LOAD_OFFSETS];
         let mut store_count = 0usize;
         let mut scan = 2;
@@ -1257,6 +1259,10 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
 
             // Skip zero-extend of setcc result
             if line == "movzbl %al, %eax" {
+                if zext_count < CMP_FUSION_LOOKAHEAD {
+                    zext_scans[zext_count] = scan;
+                    zext_count += 1;
+                }
                 scan += 1;
                 continue;
             }
@@ -1361,9 +1367,16 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
 
         let fused_jcc = format!("    j{} {}", fused_cc, branch_target);
 
-        // NOP out everything from setCC through testl
-        for s in 1..=test_scan {
-            infos[seq_indices[s]].kind = LineKind::Nop;
+        // Always remove the final test; the fused jcc now reads flags from cmp.
+        //
+        // If stores appear in the sequence, preserve setcc/materialization and
+        // intervening memory ops so assignment side effects remain intact.
+        infos[seq_indices[test_scan]].kind = LineKind::Nop;
+        if store_count == 0 {
+            infos[seq_indices[1]].kind = LineKind::Nop;
+            for k in 0..zext_count {
+                infos[seq_indices[zext_scans[k]]].kind = LineKind::Nop;
+            }
         }
         // Replace the jne/je with the fused conditional jump
         let idx = seq_indices[test_scan + 1];
@@ -1775,9 +1788,10 @@ mod tests {
     }
 
     #[test]
-    fn test_compare_branch_fusion_with_store_load() {
-        // Pattern: cmp + setCC + movzbl + store + load + test + jne
-        // The store/load pair should be skipped, allowing fusion.
+    fn test_compare_branch_fusion_with_store_preserves_materialization() {
+        // Pattern: cmp + setCC + movzbl + store + load + test + jne.
+        // We still fuse the branch, but must preserve setcc/materialization
+        // because the store side effect is observable later.
         let asm = [
             "    cmpl %ecx, %eax",
             "    setge %al",
@@ -1786,11 +1800,13 @@ mod tests {
             "    movl -16(%ebp), %eax",
             "    testl %eax, %eax",
             "    jne .LBB5",
+            ".LBB5:",
+            "    movl -16(%ebp), %edx",
         ].join("\n") + "\n";
         let result = peephole_optimize(asm);
         assert!(result.contains("jge .LBB5"), "should fuse to jge: {}", result);
-        assert!(!result.contains("setge"), "should eliminate setge: {}", result);
-        assert!(!result.contains("movzbl"), "should eliminate movzbl: {}", result);
+        assert!(result.contains("setge %al"), "must keep setcc for store side effects: {}", result);
+        assert!(result.contains("movl %eax, -16(%ebp)"), "must keep store side effect: {}", result);
         assert!(!result.contains("testl"), "should eliminate testl: {}", result);
     }
 

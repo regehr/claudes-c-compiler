@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compare_branch_fusion_with_matched_store_load() {
+    fn test_compare_branch_fusion_with_store_preserves_materialization() {
         let asm = [
             "    cmpq %rcx, %rax",
             "    setl %al",
@@ -210,11 +210,19 @@ mod tests {
             "    testq %rax, %rax",
             "    jne .LBB2",
             "    jmp .LBB4",
+            ".LBB2:",
+            "    movq -24(%rbp), %rdx",
         ].join("\n") + "\n";
         let result = peephole_optimize(asm);
         assert!(result.contains("cmpq %rcx, %rax"), "should keep the cmp");
-        assert!(result.contains("jl .LBB2"), "should fuse to jl: {}", result);
-        assert!(!result.contains("setl"), "should eliminate setl");
+        assert!(
+            result.contains("jl .LBB2") || result.contains("jge .LBB4"),
+            "should fuse to an equivalent branch: {}",
+            result
+        );
+        assert!(result.contains("setl %al"), "must keep setcc for store side effects: {}", result);
+        assert!(result.contains("movq %rax, -24(%rbp)"), "must keep store side effect: {}", result);
+        assert!(!result.contains("testq %rax, %rax"), "should eliminate testq: {}", result);
     }
 
     #[test]

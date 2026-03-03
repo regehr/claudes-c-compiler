@@ -50,6 +50,8 @@ pub(super) fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineIn
         // Track StoreRbp offsets so we can bail out if any store's slot is
         // potentially read by another basic block (no matching load nearby).
         let mut test_idx = None;
+        let mut zext_scans = [0usize; CMP_FUSION_LOOKAHEAD];
+        let mut zext_count = 0usize;
         let mut store_offsets: [i32; MAX_TRACKED_STORE_LOAD_OFFSETS] = [0; MAX_TRACKED_STORE_LOAD_OFFSETS];
         let mut store_count = 0usize;
         let mut rax_reload_offset: Option<i32> = None;
@@ -60,6 +62,10 @@ pub(super) fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineIn
 
             // Skip zero-extend of setcc result
             if line == "movzbq %al, %rax" || line == "movzbl %al, %eax" {
+                if zext_count < CMP_FUSION_LOOKAHEAD {
+                    zext_scans[zext_count] = scan;
+                    zext_count += 1;
+                }
                 scan += 1;
                 continue;
             }
@@ -171,9 +177,16 @@ pub(super) fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineIn
         let fused_cc = if is_jne { cc } else { invert_cc(cc) };
         let fused_jcc = format!("    j{} {}", fused_cc, branch_target);
 
-        // NOP out everything from setCC through testq
-        for s in 1..=test_scan {
-            mark_nop(&mut infos[seq_indices[s]]);
+        // Always remove the final test; the fused jcc now reads flags from cmp.
+        //
+        // If stores appear in the sequence, preserve setcc/materialization and
+        // intervening memory ops so assignment side effects remain intact.
+        mark_nop(&mut infos[seq_indices[test_scan]]);
+        if store_count == 0 {
+            mark_nop(&mut infos[seq_indices[1]]);
+            for k in 0..zext_count {
+                mark_nop(&mut infos[seq_indices[zext_scans[k]]]);
+            }
         }
         // Replace the jne/je with the fused conditional jump
         let idx = seq_indices[test_scan + 1];
