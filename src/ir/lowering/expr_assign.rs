@@ -168,15 +168,21 @@ impl Lowerer {
     fn try_lower_bitfield_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
         let (field_addr, storage_ty, bit_offset, bit_width) = self.resolve_bitfield_lvalue(lhs)?;
         let is_bool = self.is_bool_lvalue(lhs);
+        let lhs_ty = self.get_expr_type(lhs);
         let rhs_val = self.lower_expr(rhs);
+        let rhs_ty = self.get_expr_type(rhs);
         // C standard 6.3.1.2: assigning to _Bool converts the value to 0 or 1
         // (any nonzero becomes 1) BEFORE bitfield truncation. Without this,
         // e.g. `s.bool_bf = 2` would mask 2 (0b10) to 1 bit = 0, not 1.
         let store_val = if is_bool {
-            let rhs_ty = self.get_expr_type(rhs);
             self.emit_bool_normalize_typed(rhs_val, rhs_ty)
         } else {
-            rhs_val
+            // Bitfield assignment follows normal assignment conversions: convert
+            // RHS to the (promoted) bitfield expression type before truncation.
+            // Without this cast, values produced as narrow unsigned types (e.g.
+            // `unsigned char` from `x |= 0`) can be consumed as signed bytes
+            // during bitfield store masking and become incorrectly sign-extended.
+            self.emit_implicit_cast(rhs_val, rhs_ty, lhs_ty)
         };
         self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, store_val);
         Some(self.truncate_to_bitfield_value(store_val, bit_width, storage_ty.is_signed()))
