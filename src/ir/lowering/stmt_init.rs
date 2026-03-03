@@ -799,7 +799,8 @@ impl Lowerer {
                     } else {
                         // Leaf: this List is a single struct initializer
                         let elem_base = self.emit_gep_offset(alloca, base_byte_offset, IrType::I8);
-                        self.lower_local_struct_init(sub_items, elem_base, s_layout);
+                        let elem_items = self.normalize_leaf_struct_element_items(sub_items, s_layout);
+                        self.lower_local_struct_init(elem_items, elem_base, s_layout);
                     }
                 }
                 Initializer::Expr(e) => {
@@ -821,6 +822,58 @@ impl Lowerer {
             }
             item_idx += 1;
             *flat_idx += 1;
+        }
+    }
+
+    /// Normalize a leaf struct-element initializer from a multi-dimensional array.
+    ///
+    /// For singleton inner dimensions (e.g., `struct S a[][1] = {{{1,2}}};`), the
+    /// parser shape at the leaf can be `List([List([expr, expr, ...])])` where the
+    /// outer list is the array-element wrapper and the inner list is the struct
+    /// initializer. If we pass the outer list directly to `lower_local_struct_init`,
+    /// scalar first fields consume only the first inner expression and remaining
+    /// fields are lost.
+    ///
+    /// We unwrap one list layer only when the struct's first initializable field is
+    /// scalar-like (not array/struct/union/vector/complex), where the extra wrapper
+    /// cannot represent required subobject braces for the first field.
+    fn normalize_leaf_struct_element_items<'a>(
+        &self,
+        sub_items: &'a [InitializerItem],
+        s_layout: &crate::common::types::StructLayout,
+    ) -> &'a [InitializerItem] {
+        if sub_items.len() != 1 || !sub_items[0].designators.is_empty() {
+            return sub_items;
+        }
+        let inner_items = match &sub_items[0].init {
+            Initializer::List(inner) => inner.as_slice(),
+            _ => return sub_items,
+        };
+
+        let first_field_idx = match s_layout.resolve_init_field(
+            None,
+            0,
+            &*self.types.borrow_struct_layouts(),
+        ) {
+            Some(crate::common::types::InitFieldResolution::Direct(idx)) => idx,
+            _ => return sub_items,
+        };
+        let first_ty = &s_layout.fields[first_field_idx].ty;
+        let first_field_needs_nested_braces = matches!(
+            first_ty,
+            CType::Array(..)
+                | CType::Struct(..)
+                | CType::Union(..)
+                | CType::Vector(..)
+                | CType::ComplexFloat
+                | CType::ComplexDouble
+                | CType::ComplexLongDouble
+        );
+
+        if first_field_needs_nested_braces {
+            sub_items
+        } else {
+            inner_items
         }
     }
 
