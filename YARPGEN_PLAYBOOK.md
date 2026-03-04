@@ -156,6 +156,7 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 - Uses an absolute path for `ccc`; `clang/gcc/timeout/env` may come from `PATH`.
 - Compiles sanitized `clang` with **ASan+UBSan** and no-recover, plus `gcc`, plus `ccc`.
 - Compiles and runs an explicit **GCC UBSan** binary (`-fsanitize=undefined -fno-sanitize-recover=all`) as a mandatory UB gate.
+  - Use relaxed-alignment mode for this gate: add `-fno-sanitize=alignment`.
 - Requires clean runtime stderr for all compared binaries.
 - Requires `clang == gcc` and `clang != ccc`.
 - Uses a strict dual-compiler warning gate that includes:
@@ -172,7 +173,7 @@ Mandatory sanitizer policy (cannot be skipped):
   - `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`
   - `UBSAN_OPTIONS=halt_on_error=1`
 - `interesting.sh` must also compile and run a GCC UBSan binary with:
-  - compile: `-fsanitize=undefined -fno-sanitize-recover=all`
+  - compile: `-fsanitize=undefined -fno-sanitize=alignment -fno-sanitize-recover=all`
   - runtime: `UBSAN_OPTIONS=halt_on_error=1`
 - The GCC UBSan run is mandatory and is part of interestingness.
 - ALWAYS use **both** ASan and UBSan together for reduction and final validation.
@@ -245,7 +246,7 @@ timeout 30s gcc -x c -std=c99 -w \
   "$CAND" -o prog_gcc > /dev/null 2>err_gcc.txt || exit 1
 
 timeout 30s gcc -x c -std=c99 -w -O0 \
-  -fsanitize=undefined -fno-sanitize-recover=all \
+  -fsanitize=undefined -fno-sanitize=alignment -fno-sanitize-recover=all \
   "$CAND" -o prog_gcc_ubsan > /dev/null 2>err_gcc_ubsan.txt || exit 1
 
 timeout 30s "$CCC" -x c -std=c99 -w \
@@ -304,7 +305,7 @@ clang -x c -std=c99 -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=al
   merged.pre.c -o final_clang
 gcc -x c -std=c99 -w -O0 \
   merged.pre.c -o final_gcc
-gcc -x c -std=c99 -w -O0 -fsanitize=undefined -fno-sanitize-recover=all \
+gcc -x c -std=c99 -w -O0 -fsanitize=undefined -fno-sanitize=alignment -fno-sanitize-recover=all \
   merged.pre.c -o final_gcc_ubsan
 ROOT="/home/regehr/claudes-c-compiler"
 CCC="$ROOT/target/release/ccc"
@@ -326,7 +327,7 @@ Final validation rule (cannot be skipped):
   `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`,
   `UBSAN_OPTIONS=halt_on_error=1`.
 - The final validation must also include a GCC UBSan run with:
-  `-fsanitize=undefined -fno-sanitize-recover=all`,
+  `-fsanitize=undefined -fno-sanitize=alignment -fno-sanitize-recover=all`,
   `UBSAN_OPTIONS=halt_on_error=1`.
 - Any UBSan stderr from the GCC UBSan run invalidates the testcase.
 - A "final" testcase validated without clang ASan+UBSan **and** GCC UBSan is invalid.

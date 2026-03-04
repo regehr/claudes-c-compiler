@@ -834,22 +834,15 @@ impl Lowerer {
     /// scalar first fields consume only the first inner expression and remaining
     /// fields are lost.
     ///
-    /// We unwrap one list layer only when the struct's first initializable field is
-    /// scalar-like (not array/struct/union/vector/complex), where the extra wrapper
-    /// cannot represent required subobject braces for the first field.
+    /// We unwrap redundant singleton list layers only when the struct's first
+    /// initializable field is scalar-like (not array/struct/union/vector/complex),
+    /// where extra wrappers cannot represent required subobject braces for the
+    /// first field.
     fn normalize_leaf_struct_element_items<'a>(
         &self,
         sub_items: &'a [InitializerItem],
         s_layout: &crate::common::types::StructLayout,
     ) -> &'a [InitializerItem] {
-        if sub_items.len() != 1 || !sub_items[0].designators.is_empty() {
-            return sub_items;
-        }
-        let inner_items = match &sub_items[0].init {
-            Initializer::List(inner) => inner.as_slice(),
-            _ => return sub_items,
-        };
-
         let first_field_idx = match s_layout.resolve_init_field(
             None,
             0,
@@ -871,10 +864,26 @@ impl Lowerer {
         );
 
         if first_field_needs_nested_braces {
-            sub_items
-        } else {
-            inner_items
+            return sub_items;
         }
+
+        // For scalar-leading structs, singleton inner dimensions may introduce
+        // multiple redundant list wrappers (e.g., [][1][1] with {{{{...}}}}).
+        // Peel all-empty-designator single-list layers so all scalar field
+        // initializers remain visible to lower_local_struct_init.
+        let mut normalized = sub_items;
+        loop {
+            if normalized.len() != 1 || !normalized[0].designators.is_empty() {
+                break;
+            }
+            match &normalized[0].init {
+                Initializer::List(inner) => {
+                    normalized = inner.as_slice();
+                }
+                _ => break,
+            }
+        }
+        normalized
     }
 
     /// Handle field-designated list init for a struct array element:
