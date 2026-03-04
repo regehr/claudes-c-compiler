@@ -192,9 +192,12 @@ Mandatory uninitialized-read policy (ZERO TOLERANCE, cannot be skipped):
     - `-Werror=uninitialized -Werror=maybe-uninitialized`
 - `interesting.sh` must also run `clang --analyze` and reject
   `core.uninitialized.*` findings.
+- `interesting.sh` must also run a GCC analyzer gate and reject uninitialized-use findings:
+  - `-fanalyzer -Wanalyzer-use-of-uninitialized-value`
+  - enforce with `-Werror=analyzer-use-of-uninitialized-value`
 - Any reduction run that omits any one of these checks is invalid and must be discarded.
 - Rationale: Clang warning diagnostics alone can miss uninitialized reads through
-  struct/array members; GCC/analyzer backstops are required.
+  struct/array members; GCC analyzer backstop is required.
 
 Mandatory pointer-vs-integer comparison policy (ZERO TOLERANCE, cannot be skipped):
 - `interesting.sh` must run dedicated warning scans with BOTH compilers:
@@ -221,7 +224,8 @@ rm -f prog_clang prog_gcc prog_ccc \
   prog_gcc_ubsan \
   out_clang.txt out_gcc.txt out_ccc.txt \
   err_clang.txt err_gcc.txt err_ccc.txt err_gcc_ubsan.txt \
-  warn_clang.log warn_gcc.log warn_analyze.log warn_gcc.o \
+  warn_clang.log warn_gcc.log warn_analyze.log warn_gcc_analyze.log \
+  warn_gcc.o warn_gcc_analyze.o \
   warn_ptrint_clang.log warn_ptrint_gcc.log warn_ptrint_gcc.o
 
 timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
@@ -242,6 +246,11 @@ timeout 30s gcc -x c -std=c99 -O2 -c \
   -Wuninitialized -Wmaybe-uninitialized \
   -Werror=uninitialized -Werror=maybe-uninitialized \
   "$CAND" -o warn_gcc.o > warn_gcc.log 2>&1 || exit 1
+
+timeout 45s gcc -x c -std=c99 -O0 -fanalyzer -c \
+  -Wanalyzer-use-of-uninitialized-value \
+  -Werror=analyzer-use-of-uninitialized-value \
+  "$CAND" -o warn_gcc_analyze.o > warn_gcc_analyze.log 2>&1 || exit 1
 
 timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
   -Wall "$CAND" > warn_ptrint_clang.log 2>&1 || exit 1
@@ -398,13 +407,15 @@ Standing policy:
     (`-O2`, `-Wuninitialized`, `-Wconditional-uninitialized`).
 
 - Reduced testcase still contains uninitialized automatic local reads:
-  - Cause: only Clang warning checks were enforced.
+  - Cause: only compiler warning checks were enforced; those missed this path.
   - Fix: enforce the mandatory dual gate and analyzer backstop:
     - Clang: `-O2 -fsyntax-only -Wuninitialized -Wconditional-uninitialized`
       with corresponding `-Werror=` flags.
     - GCC: `-O2 -c -Wuninitialized -Wmaybe-uninitialized`
       with corresponding `-Werror=` flags.
-    - Analyzer: reject `core.uninitialized.*` from `clang --analyze`.
+    - Clang analyzer: reject `core.uninitialized.*` from `clang --analyze`.
+    - GCC analyzer: enforce
+      `-fanalyzer -Wanalyzer-use-of-uninitialized-value -Werror=analyzer-use-of-uninitialized-value`.
   - Absolute rule: if any of these are missing, the reduction is invalid.
 
 - Reduced testcase still contains pointer-vs-integer comparisons:
