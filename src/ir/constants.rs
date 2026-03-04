@@ -484,11 +484,14 @@ impl IrConst {
     pub fn coerce_to_with_src(&self, target_ty: IrType, src_ty: Option<IrType>) -> IrConst {
         // Check if already the right type
         match (self, target_ty) {
-            (IrConst::I8(_), IrType::I8 | IrType::U8) => return *self,
-            (IrConst::I16(_), IrType::I16 | IrType::U16) => return *self,
+            (IrConst::I8(_), IrType::I8) => return *self,
+            (IrConst::I16(_), IrType::I16) => return *self,
             (IrConst::I32(_), IrType::I32) => return *self,
-            // U32 is stored as I64 (zero-extended), so I32 must be converted
-            (IrConst::I64(_), IrType::U32) => return *self,
+            // U8/U16/U32 are represented as I64 with zero-extended values.
+            // Only fast-path when already in canonical unsigned range.
+            (IrConst::I64(v), IrType::U8) if (0..=u8::MAX as i64).contains(v) => return *self,
+            (IrConst::I64(v), IrType::U16) if (0..=u16::MAX as i64).contains(v) => return *self,
+            (IrConst::I64(v), IrType::U32) if (0..=u32::MAX as i64).contains(v) => return *self,
             (IrConst::I64(_), IrType::I64 | IrType::U64) => return *self,
             // Ptr: on LP64 I64 is already correct; on ILP32 we need I32
             (IrConst::I64(v), IrType::Ptr) => {
@@ -640,5 +643,31 @@ impl IrConst {
             IrType::F128 => IrConst::long_double(1.0),
             _ => IrConst::I64(1),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coerce_i64_negative_to_u32_zero_extends() {
+        let c = IrConst::I64(-7);
+        let got = c.coerce_to_with_src(IrType::U32, Some(IrType::I64));
+        assert!(matches!(got, IrConst::I64(4294967289)));
+    }
+
+    #[test]
+    fn coerce_i8_negative_to_u8_zero_extends() {
+        let c = IrConst::I8(-1);
+        let got = c.coerce_to_with_src(IrType::U8, None);
+        assert!(matches!(got, IrConst::I64(255)));
+    }
+
+    #[test]
+    fn coerce_i16_negative_to_u16_zero_extends() {
+        let c = IrConst::I16(-1);
+        let got = c.coerce_to_with_src(IrType::U16, None);
+        assert!(matches!(got, IrConst::I64(65535)));
     }
 }
