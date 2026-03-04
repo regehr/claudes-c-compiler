@@ -196,6 +196,17 @@ Mandatory uninitialized-read policy (ZERO TOLERANCE, cannot be skipped):
 - Rationale: Clang warning diagnostics alone can miss uninitialized reads through
   struct/array members; GCC/analyzer backstops are required.
 
+Mandatory pointer-vs-integer comparison policy (ZERO TOLERANCE, cannot be skipped):
+- `interesting.sh` must run dedicated warning scans with BOTH compilers:
+  - Clang scan: `-O2 -fsyntax-only -Wall`
+  - GCC scan: `-O2 -c -Wall`
+- `interesting.sh` must reject the testcase if either scan reports pointer-vs-integer
+  comparisons (for example, diagnostics containing:
+  - `ordered comparison between pointer and integer`
+  - `comparison between pointer and integer`)
+- Any reduction run that does not enforce this rejection rule is invalid and must be discarded.
+- This is a hard UB guardrail: do not "explain away" these warnings after reduction.
+
 Template:
 
 ```bash
@@ -210,7 +221,8 @@ rm -f prog_clang prog_gcc prog_ccc \
   prog_gcc_ubsan \
   out_clang.txt out_gcc.txt out_ccc.txt \
   err_clang.txt err_gcc.txt err_ccc.txt err_gcc_ubsan.txt \
-  warn_clang.log warn_gcc.log warn_analyze.log warn_gcc.o
+  warn_clang.log warn_gcc.log warn_analyze.log warn_gcc.o \
+  warn_ptrint_clang.log warn_ptrint_gcc.log warn_ptrint_gcc.o
 
 timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
   -Wno-everything \
@@ -227,10 +239,21 @@ timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
   "$CAND" > warn_clang.log 2>&1 || exit 1
 
 timeout 30s gcc -x c -std=c99 -O2 -c \
-  -Wno-everything \
   -Wuninitialized -Wmaybe-uninitialized \
   -Werror=uninitialized -Werror=maybe-uninitialized \
   "$CAND" -o warn_gcc.o > warn_gcc.log 2>&1 || exit 1
+
+timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
+  -Wall "$CAND" > warn_ptrint_clang.log 2>&1 || exit 1
+
+timeout 30s gcc -x c -std=c99 -O2 -c \
+  -Wall "$CAND" -o warn_ptrint_gcc.o > warn_ptrint_gcc.log 2>&1 || exit 1
+
+if rg -qi \
+  "ordered comparison between pointer and integer|comparison between pointer and integer" \
+  warn_ptrint_clang.log warn_ptrint_gcc.log; then
+  exit 1
+fi
 
 timeout 30s clang -x c -std=c99 -O0 --analyze \
   "$CAND" > warn_analyze.log 2>&1 || exit 1
@@ -383,6 +406,12 @@ Standing policy:
       with corresponding `-Werror=` flags.
     - Analyzer: reject `core.uninitialized.*` from `clang --analyze`.
   - Absolute rule: if any of these are missing, the reduction is invalid.
+
+- Reduced testcase still contains pointer-vs-integer comparisons:
+  - Cause: interestingness gate did not enforce compiler warning rejection for this UB class.
+  - Fix: enforce the mandatory dual-compiler pointer-vs-integer scan and rejection rule.
+  - Absolute rule: if either compiler reports pointer-vs-integer comparison diagnostics,
+    the testcase is invalid for bug-fixing and reduction must continue.
 
 - Reduced testcase hits UB that clang sanitizers do not report (for example, zero-length-array OOB patterns):
   - Cause: relying on clang sanitizer runtime only.
