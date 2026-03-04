@@ -684,7 +684,10 @@ impl Lowerer {
                     // the variable's own dimensions.
                     self.collect_derived_array_dims(derived)
                 };
-                let resolved_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(256)).collect();
+                // Unsized array dimensions (None) must not balloon to an arbitrary
+                // length. For tentative/incomplete arrays, C treats the missing
+                // bound as one element at end of translation unit.
+                let resolved_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(1)).collect();
                 let total_size: usize = resolved_dims.iter().product::<usize>() * ptr_sz;
                 let strides = if resolved_dims.len() > 1 {
                     Self::compute_strides_from_dims(&resolved_dims, ptr_sz)
@@ -807,7 +810,9 @@ impl Lowerer {
             };
 
             // Combine: derived dims come first (outermost), then type dims
-            let all_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(256))
+            // Keep unsized dimensions as a single element instead of inventing
+            // a large default extent.
+            let all_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(1))
                 .chain(type_dims.iter().copied())
                 .collect();
 
