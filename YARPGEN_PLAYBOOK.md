@@ -9,6 +9,7 @@ Scope:
 - Preprocess testcase before any reduction step.
 - Avoid false positives from obvious UB in reductions.
 - For sanitizer gating, ALWAYS use BOTH ASan and UBSan together (never just one).
+- For reduction-time UB screening, ALWAYS run a GCC UBSan runtime gate in addition to the clang ASan+UBSan gate.
 
 ## Mandatory Bug-Fix Policy
 
@@ -154,6 +155,7 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 - Uses local candidate filename only (no args, no absolute candidate path).
 - Uses an absolute path for `ccc`; `clang/gcc/timeout/env` may come from `PATH`.
 - Compiles sanitized `clang` with **ASan+UBSan** and no-recover, plus `gcc`, plus `ccc`.
+- Compiles and runs an explicit **GCC UBSan** binary (`-fsanitize=undefined -fno-sanitize-recover=all`) as a mandatory UB gate.
 - Requires clean runtime stderr for all compared binaries.
 - Requires `clang == gcc` and `clang != ccc`.
 - Uses a strict dual-compiler warning gate that includes:
@@ -163,14 +165,19 @@ Reduce only `merged.pre.c` (single-file, preprocessed input).
 - Avoids broad noisy gates such as `-Wstrict-prototypes`.
 
 Mandatory sanitizer policy (cannot be skipped):
+- **HARD REQUIREMENT (ZERO TOLERANCE): GCC UBSan runtime gating is mandatory for every reduction run.**
 - `interesting.sh` must compile the clang baseline with
   `-fsanitize=address,undefined -fno-sanitize-recover=all`.
 - Runtime must set:
   - `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`
   - `UBSAN_OPTIONS=halt_on_error=1`
+- `interesting.sh` must also compile and run a GCC UBSan binary with:
+  - compile: `-fsanitize=undefined -fno-sanitize-recover=all`
+  - runtime: `UBSAN_OPTIONS=halt_on_error=1`
+- The GCC UBSan run is mandatory and is part of interestingness.
 - ALWAYS use **both** ASan and UBSan together for reduction and final validation.
 - Never run with UBSan-only or ASan-only settings.
-- Any reduction run that does not enforce both sanitizers is invalid.
+- Any reduction run that omits GCC UBSan, or does not enforce both clang sanitizers, is invalid.
 
 Mandatory uninitialized-read policy (ZERO TOLERANCE, cannot be skipped):
 - `interesting.sh` must enforce BOTH of the following gates:
@@ -199,8 +206,9 @@ CCC="$ROOT/target/release/ccc"
 CAND="merged.pre.c"
 
 rm -f prog_clang prog_gcc prog_ccc \
+  prog_gcc_ubsan \
   out_clang.txt out_gcc.txt out_ccc.txt \
-  err_clang.txt err_gcc.txt err_ccc.txt \
+  err_clang.txt err_gcc.txt err_ccc.txt err_gcc_ubsan.txt \
   warn_clang.log warn_gcc.log warn_analyze.log warn_gcc.o
 
 timeout 30s clang -x c -std=c99 -O2 -fsyntax-only \
@@ -236,11 +244,18 @@ timeout 30s clang -x c -std=c99 -w -O0 \
 timeout 30s gcc -x c -std=c99 -w \
   "$CAND" -o prog_gcc > /dev/null 2>err_gcc.txt || exit 1
 
+timeout 30s gcc -x c -std=c99 -w -O0 \
+  -fsanitize=undefined -fno-sanitize-recover=all \
+  "$CAND" -o prog_gcc_ubsan > /dev/null 2>err_gcc_ubsan.txt || exit 1
+
 timeout 30s "$CCC" -x c -std=c99 -w \
   "$CAND" -o prog_ccc > /dev/null 2>err_ccc.txt || exit 1
 
 timeout 5s env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./prog_clang > out_clang.txt 2>>err_clang.txt || exit 1
+
+timeout 5s env UBSAN_OPTIONS=halt_on_error=1 \
+  ./prog_gcc_ubsan > /dev/null 2>>err_gcc_ubsan.txt || exit 1
 
 timeout 5s ./prog_gcc > out_gcc.txt 2>>err_gcc.txt || exit 1
 
@@ -248,6 +263,7 @@ timeout 5s ./prog_ccc > out_ccc.txt 2>>err_ccc.txt || exit 1
 
 [ ! -s err_clang.txt ] || exit 1
 [ ! -s err_gcc.txt ] || exit 1
+[ ! -s err_gcc_ubsan.txt ] || exit 1
 [ ! -s err_ccc.txt ] || exit 1
 cmp -s out_clang.txt out_gcc.txt || exit 1
 ! cmp -s out_clang.txt out_ccc.txt || exit 1
@@ -288,12 +304,16 @@ clang -x c -std=c99 -w -O0 -fsanitize=address,undefined -fno-sanitize-recover=al
   merged.pre.c -o final_clang
 gcc -x c -std=c99 -w -O0 \
   merged.pre.c -o final_gcc
+gcc -x c -std=c99 -w -O0 -fsanitize=undefined -fno-sanitize-recover=all \
+  merged.pre.c -o final_gcc_ubsan
 ROOT="/home/regehr/claudes-c-compiler"
 CCC="$ROOT/target/release/ccc"
 "$CCC" -x c -std=c99 -w -O0 \
   merged.pre.c -o final_ccc
 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./final_clang > final.out.clang 2> final.err.clang
+UBSAN_OPTIONS=halt_on_error=1 \
+  ./final_gcc_ubsan > /dev/null 2> final.err.gcc_ubsan
 ./final_gcc > final.out.gcc 2> final.err.gcc
 ./final_ccc > final.out.ccc 2> final.err.ccc
 diff -u final.out.clang final.out.gcc || true
@@ -305,7 +325,11 @@ Final validation rule (cannot be skipped):
   `-fsanitize=address,undefined -fno-sanitize-recover=all`,
   `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`,
   `UBSAN_OPTIONS=halt_on_error=1`.
-- A "final" testcase validated without both sanitizers is invalid.
+- The final validation must also include a GCC UBSan run with:
+  `-fsanitize=undefined -fno-sanitize-recover=all`,
+  `UBSAN_OPTIONS=halt_on_error=1`.
+- Any UBSan stderr from the GCC UBSan run invalidates the testcase.
+- A "final" testcase validated without clang ASan+UBSan **and** GCC UBSan is invalid.
 
 Mandatory reporting rule (cannot be skipped):
 - In the user-facing final report, always show the full final reduced testcase
@@ -358,6 +382,11 @@ Standing policy:
       with corresponding `-Werror=` flags.
     - Analyzer: reject `core.uninitialized.*` from `clang --analyze`.
   - Absolute rule: if any of these are missing, the reduction is invalid.
+
+- Reduced testcase hits UB that clang sanitizers do not report (for example, zero-length-array OOB patterns):
+  - Cause: relying on clang sanitizer runtime only.
+  - Fix: enforce mandatory GCC UBSan runtime gate in `interesting.sh` and final validation.
+  - Absolute rule: a reduction without GCC UBSan runtime screening is invalid.
 
 - Over-reduced testcase devolves into obvious UB (e.g., bad `printf` usage):
   - Enforce warning-gate checks in `interesting.sh` as above.
