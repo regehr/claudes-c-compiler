@@ -1227,4 +1227,28 @@ mod regression_tests {
         assert!(result.contains("movq %rsi, -8(%rbp)"),
             "struct param store at -8(%rbp) must NOT be NOP'd when -4(%rbp) is read: {}", result);
     }
+
+    /// Regression test: memory-fold must not fold a 32-bit load into a 64-bit cmp.
+    /// `movl -16(%rbp), %eax` zero-extends into %rax; replacing
+    /// `cmpq %rsi, %r9` with `cmpq -16(%rbp), %r9` would read 8 bytes directly and
+    /// lose that zero-extension semantics.
+    #[test]
+    fn test_memory_fold_rejects_mismatched_cmp_width() {
+        let asm = [
+            "func:",
+            "    pushq %rbp",
+            "    movq %rsp, %rbp",
+            "    movl -16(%rbp), %eax",
+            "    movl %eax, %eax",
+            "    movq %rax, %rsi",
+            "    cmpq %rsi, %r9",
+            "    ret",
+            ".size func, .-func",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(!result.contains("cmpq -16(%rbp), %r9"),
+            "must not fold movl source into cmpq memory operand: {}", result);
+        assert!(result.contains("movl -16(%rbp), %eax"),
+            "32-bit load should remain to preserve zero-extension semantics: {}", result);
+    }
 }

@@ -118,6 +118,20 @@ pub(super) fn fold_memory_operands(store: &mut LineStore, infos: &mut [LineInfo]
             if is_foldable_target {
                 let trimmed_j = infos[j].trimmed(store.get(j));
                 if let Some((op_suffix, dst_str, src_fam, dst_fam)) = parse_alu_reg_reg(trimmed_j) {
+                    // Width-safety: only fold when the load width matches the ALU width.
+                    // Folding `movl -N(%rbp), %eax` into `cmpq -N(%rbp), %r9` is
+                    // incorrect because movl zero-extends to 64 bits, while cmpq on
+                    // memory reads all 8 bytes directly.
+                    let op_w = op_suffix.as_bytes().last().copied();
+                    let size_matches = matches!(
+                        (load_size, op_w),
+                        (MoveSize::Q, Some(b'q')) | (MoveSize::L, Some(b'l'))
+                    );
+                    if !size_matches {
+                        i += 1;
+                        continue;
+                    }
+
                     if src_fam == load_reg && dst_fam != load_reg {
                         // Check for intervening store to the same offset
                         let mut intervening_store = false;
