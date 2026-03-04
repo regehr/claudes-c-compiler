@@ -146,6 +146,7 @@ def run_one_case(
     case_meta = {
         "seed": seed,
         "source": str(src),
+        "generation": {},
         "compile": {},
         "run": {},
         "divergence": None,
@@ -154,22 +155,24 @@ def run_one_case(
     csmith_cmd = [csmith_path, "--seed", str(seed)]
     with open(src, "w", encoding="utf-8") as out_f:
         csmith_res = run_cmd(csmith_cmd, timeout=compile_timeout)
+        case_meta["generation"] = {
+            "cmd": csmith_cmd,
+            **csmith_res,
+        }
         if csmith_res["timed_out"] or csmith_res["returncode"] != 0:
-            case_meta["divergence"] = {
-                "type": "generation_failure",
-                "csmith_cmd": csmith_cmd,
-                "csmith_result": csmith_res,
-            }
             write_json(case_dir / "result.json", case_meta)
-            dest = Path(divergence_root) / f"seed_{seed}_generation_failure"
-            if dest.exists():
-                dest = Path(divergence_root) / f"seed_{seed}_generation_failure_{int(time.time() * 1000)}"
-            shutil.move(str(case_dir), str(dest))
+            if keep_all:
+                return {
+                    "seed": seed,
+                    "status": "skipped",
+                    "reason": "generation_failure",
+                    "artifact_dir": str(case_dir),
+                }
+            shutil.rmtree(case_dir, ignore_errors=True)
             return {
                 "seed": seed,
-                "status": "divergence",
-                "type": "generation_failure",
-                "artifact_dir": str(dest),
+                "status": "skipped",
+                "reason": "generation_failure",
             }
         out_f.write(csmith_res["stdout"])
 
@@ -407,6 +410,7 @@ def main():
     total_target = args.tests
     total_done = 0
     divergences = 0
+    skipped = 0
     seed_next = args.seed_start
 
     stop = False
@@ -477,8 +481,12 @@ def main():
                 print(f"[seed {seed}] internal error: {res.get('error')}")
                 if not args.continue_on_divergence:
                     stop = True
+            elif res["status"] == "skipped":
+                skipped += 1
             elif total_done % 10 == 0:
-                print(f"[progress] completed={total_done} divergences={divergences}")
+                print(
+                    f"[progress] completed={total_done} divergences={divergences} skipped={skipped}"
+                )
 
             if total_target and total_done >= total_target:
                 stop = True
@@ -488,7 +496,7 @@ def main():
         terminate_children(in_flight)
 
     print(
-        f"done: completed={total_done} divergences={divergences} "
+        f"done: completed={total_done} divergences={divergences} skipped={skipped} "
         f"results_dir={out_dir}"
     )
 
