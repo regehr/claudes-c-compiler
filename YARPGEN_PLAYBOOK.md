@@ -104,15 +104,21 @@ clang driver.ccc.o   func.clang.o -o mix_cccdriver_clangfunc
 Use TU localization for diagnosis only. Do **not** use multi-TU reduction inputs.
 Reduction must follow the single-file flow in Section 3.
 
-## 3) MANDATORY: Merge To Single File And Preprocess Before Any Reduction
+## 3) MANDATORY: Preprocess Before Any Reduction (No Exceptions)
 
 Non-negotiable policy (cannot be skipped):
 - Always merge `driver.c` + `func.c` into one C input before reduction.
 - Always preprocess that merged file before reduction.
+- If the input is already a single C file (for example `csmith-diff`'s `test.c`), still preprocess it and reduce the preprocessed file.
 - Any reduction run that skips either step is invalid; discard it and restart.
 
-Never run `cvise` on raw yarpgen source and never run it on split TU inputs.
-Always reduce `merged.pre.c`.
+Never run `cvise` on raw source (`driver.c`, `func.c`, `test.c`, or any non-preprocessed file).
+Never run `cvise` on split TU inputs.
+Always reduce a preprocessed file named `merged.pre.c`.
+
+Hard enforcement rule:
+- A reduction started from non-preprocessed input is considered operator error.
+- Stop immediately, preprocess, and restart reduction from scratch.
 
 Required commands:
 
