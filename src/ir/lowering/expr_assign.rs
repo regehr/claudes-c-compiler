@@ -193,21 +193,34 @@ impl Lowerer {
         let (field_addr, storage_ty, bit_offset, bit_width) = self.resolve_bitfield_lvalue(lhs)?;
         let is_bool = self.is_bool_lvalue(lhs);
 
+        let lhs_ty = self.get_expr_type(lhs);
+        let lhs_ir_ty = self.infer_expr_type(lhs);
+        let rhs_ir_ty = self.infer_expr_type(rhs);
+        let rhs_ty = self.get_expr_type(rhs);
+
+        let (common_ty, op_ty) = Self::usual_arithmetic_conversions(lhs_ty, rhs_ty, lhs_ir_ty, rhs_ir_ty);
+
+        // Use the same promotion path as normal scalar compound assignment so
+        // narrow unsigned RHS values are extended correctly before the binop.
         let current_val = self.extract_bitfield_from_addr(field_addr, storage_ty, bit_offset, bit_width);
+        let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+        let current_promoted = self.promote_for_op(current_val, lhs_ty, lhs_ir_ty, op_ty, common_ty, is_shift);
+        let rhs_promoted = self.lower_expr_with_type(rhs, op_ty);
 
-        let rhs_val = self.lower_expr(rhs);
-
-        let is_unsigned = storage_ty.is_unsigned();
+        let is_unsigned = if is_shift {
+            Self::integer_promote(lhs_ir_ty).is_unsigned()
+        } else {
+            common_ty.is_unsigned()
+        };
         let ir_op = Self::binop_to_ir(*op, is_unsigned);
-        let wt = widened_op_type(IrType::I32);
-        let result = self.emit_binop_val(ir_op, current_val, rhs_val, wt);
+        let result = self.emit_binop_val(ir_op, current_promoted, rhs_promoted, op_ty);
 
         // C standard 6.3.1.2: when the target is _Bool, normalize the result
         // to 0 or 1 before storing into the bitfield.
         let store_val = if is_bool {
-            self.emit_bool_normalize_typed(Operand::Value(result), wt)
+            self.emit_bool_normalize_typed(Operand::Value(result), op_ty)
         } else {
-            Operand::Value(result)
+            self.narrow_from_op(Operand::Value(result), lhs_ty, lhs_ir_ty, op_ty)
         };
 
         self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, store_val);
