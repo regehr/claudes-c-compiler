@@ -87,8 +87,10 @@ impl Lowerer {
 
                 match &item.init {
                     Initializer::List(sub_items) => {
-                        if this_stride > struct_size && !remaining_strides.is_empty() {
-                            // Sub-array dimension: recurse
+                        if !remaining_strides.is_empty() {
+                            // Sub-array dimension: recurse even when extent is 1.
+                            // In that case this_stride == struct_size, but we still
+                            // must peel one brace level before treating as a struct.
                             self.fill_multidim_struct_array_with_ptrs(
                                 sub_items, layout, struct_size, remaining_strides,
                                 bytes, ptr_ranges, elem_offset, this_stride,
