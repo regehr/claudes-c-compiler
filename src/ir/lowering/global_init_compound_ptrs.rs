@@ -776,6 +776,19 @@ impl Lowerer {
                 } else if let Some(val) = self.eval_const_expr(expr) {
                     self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
                 }
+            } else if let Initializer::List(ref sub_items) = item.init {
+                // Braces around scalar (e.g., `{{6}}`) are valid and should initialize
+                // this element, not be silently dropped.
+                if has_ptrs {
+                    if let Some(expr) = Self::unwrap_nested_init_expr(sub_items) {
+                        self.write_expr_to_bytes_or_ptrs(
+                            expr, elem_ty, elem_offset, None, None, bytes, ptr_ranges,
+                        );
+                    }
+                } else {
+                    let val = self.eval_init_scalar(&item.init);
+                    self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                }
             }
             current_idx += 1;
         }
