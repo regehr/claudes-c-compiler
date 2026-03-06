@@ -730,9 +730,9 @@ impl Lowerer {
     ///
     /// `dim_strides` contains the byte strides for each remaining dimension.
     /// For `struct t a[2][2][2]` with struct_size=8, strides are [32, 16, 8].
-    /// At each level, if stride > struct_size, the brace-delimited `List` items
-    /// represent sub-arrays that must be recursed into. When stride == struct_size,
-    /// we've reached leaf elements and each `List` is a single struct initializer.
+    /// At each level, if there are remaining dimensions, the brace-delimited
+    /// `List` items represent sub-arrays that must be recursed into, including
+    /// singleton inner dimensions where stride == struct_size.
     fn lower_struct_array_init_recursive(
         &mut self,
         items: &[InitializerItem],
@@ -752,7 +752,7 @@ impl Lowerer {
 
         // How many leaf structs fit in one element at this dimension level
         let elems_per_slot = if struct_size > 0 { this_stride / struct_size } else { 1 };
-        let is_subarray = this_stride > struct_size && !remaining.is_empty();
+        let is_subarray = !remaining.is_empty();
 
         let mut item_idx = 0usize;
         while item_idx < items.len() {
