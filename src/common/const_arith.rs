@@ -466,16 +466,41 @@ pub fn negate_const_typed(val: IrConst, result_size: usize, result_unsigned: boo
     }
 }
 
-/// Bitwise NOT of a constant value (unary `~`).
-/// Sub-int types are promoted to i32 per C integer promotion rules.
-pub fn bitnot_const(val: IrConst) -> Option<IrConst> {
-    match val {
-        IrConst::I128(v) => Some(IrConst::I128(!v)),
-        IrConst::I64(v) => Some(IrConst::I64(!v)),
-        IrConst::I32(v) => Some(IrConst::I32(!v)),
-        IrConst::I8(v) => Some(IrConst::I32(!(v as i32))),
-        IrConst::I16(v) => Some(IrConst::I32(!(v as i32))),
-        _ => None,
+/// Bitwise NOT with explicit result-type width/signedness semantics.
+///
+/// C computes unary `~` in the promoted operand type. For unsigned 32-bit results
+/// represented as `IrConst::I64`, this must truncate to 32 bits (`~0u -> 0`) rather
+/// than complementing all 64 bits.
+pub fn bitnot_const_typed(val: IrConst, result_size: usize, result_unsigned: bool) -> Option<IrConst> {
+    if result_size > 8 {
+        let width_bits = (result_size * 8).clamp(1, 128);
+        let mask = if width_bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << width_bits) - 1
+        };
+        let out = (!(val.to_i128()? as u128)) & mask;
+        return Some(IrConst::I128(out as i128));
+    }
+
+    let width_bits = (result_size * 8).clamp(1, 64);
+    let mask = if width_bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width_bits) - 1
+    };
+    let out = (!(val.to_i64()? as u64)) & mask;
+
+    if result_unsigned {
+        if width_bits <= 32 {
+            Some(IrConst::I64(out as u32 as i64))
+        } else {
+            Some(IrConst::I64(out as i64))
+        }
+    } else if width_bits <= 32 {
+        Some(IrConst::I32(out as u32 as i32))
+    } else {
+        Some(IrConst::I64(out as i64))
     }
 }
 
@@ -657,5 +682,17 @@ mod tests {
     fn unary_neg_signed_keeps_signed_result() {
         let result = negate_const_typed(IrConst::I32(8), 4, false).unwrap();
         assert!(matches!(result, IrConst::I32(-8)));
+    }
+
+    #[test]
+    fn unary_bitnot_unsigned_u32_truncates_to_32_bits() {
+        let result = bitnot_const_typed(IrConst::I64(u32::MAX as i64), 4, true).unwrap();
+        assert_eq!(result.to_u64(), Some(0));
+    }
+
+    #[test]
+    fn unary_bitnot_unsigned_char_promotes_to_signed_int() {
+        let result = bitnot_const_typed(IrConst::I32(255), 4, false).unwrap();
+        assert!(matches!(result, IrConst::I32(-256)));
     }
 }

@@ -116,32 +116,22 @@ impl<'a> SemaConstEval<'a> {
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
-                let is_unsigned = self.is_expr_unsigned(inner);
-                let promoted = shared_const_eval::promote_sub_int(val, is_unsigned);
-                let result = const_arith::bitnot_const(promoted)?;
-                // For unsigned int operands (stored as I64 to preserve unsigned range),
-                // the bitwise NOT must be truncated to 32 bits. Without this, ~0u
-                // produces I64(-1) (all 64 bits set) instead of I64(0xFFFFFFFF).
-                // Check the promoted type's actual width via the inner expression type.
-                let inner_ctype = self.lookup_expr_type(inner)
-                    .or_else(|| self.infer_expr_ctype(inner));
-                let is_32bit_type = inner_ctype.as_ref().map_or(
-                    matches!(result, IrConst::I32(_)),
-                    |ct| {
-                        let size = self.ctype_size(ct);
-                        size <= 4
-                    },
-                );
-                if is_32bit_type && is_unsigned {
-                    // Truncate to 32-bit unsigned: mask to 0xFFFFFFFF and store as I64
-                    if let Some(v) = result.to_i64() {
-                        Some(IrConst::I64(v as u32 as i64))
-                    } else {
-                        Some(result)
-                    }
-                } else {
-                    Some(result)
-                }
+                let src_unsigned = self.is_expr_unsigned(inner);
+                let promoted = shared_const_eval::promote_sub_int(val, src_unsigned);
+                let result_ctype = self.lookup_expr_type(expr)
+                    .or_else(|| self.infer_expr_ctype(expr));
+                let result_unsigned = result_ctype.as_ref().is_some_and(|ct| ct.is_unsigned());
+                let result_size = result_ctype
+                    .as_ref()
+                    .map_or(
+                        match promoted {
+                            IrConst::I128(_) => 16,
+                            IrConst::I64(_) => 8,
+                            _ => 4,
+                        },
+                        |ct| self.ctype_size(ct).max(4),
+                    );
+                const_arith::bitnot_const_typed(promoted, result_size, result_unsigned)
             }
 
             // Logical NOT

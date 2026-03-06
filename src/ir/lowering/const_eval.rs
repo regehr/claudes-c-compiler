@@ -167,8 +167,12 @@ impl Lowerer {
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
-                let promoted = shared_const_eval::promote_sub_int(val, self.is_expr_unsigned_for_const(inner));
-                const_arith::bitnot_const(promoted)
+                let src_unsigned = self.is_expr_unsigned_for_const(inner);
+                let promoted = shared_const_eval::promote_sub_int(val, src_unsigned);
+                let promoted_ty = Self::integer_promote(self.infer_expr_type(inner));
+                let result_size = promoted_ty.size().max(4);
+                let result_unsigned = promoted_ty.is_unsigned();
+                const_arith::bitnot_const_typed(promoted, result_size, result_unsigned)
             }
             Expr::Cast(ref target_type, inner, _) => {
                 self.eval_const_cast(target_type, inner)
