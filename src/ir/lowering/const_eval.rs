@@ -262,7 +262,14 @@ impl Lowerer {
     /// Evaluate a cast expression at compile time.
     fn eval_const_cast(&self, target_type: &TypeSpecifier, inner: &Expr) -> Option<IrConst> {
         let target_ir_ty = self.type_spec_to_ir(target_type);
+        let target_ctype = self.type_spec_to_ctype(target_type);
         let src_val = self.eval_const_expr(inner)?;
+
+        // C11 6.3.1.2: conversion to _Bool yields 0 if value compares equal to 0,
+        // otherwise 1. Apply this before any truncation-based cast path.
+        if target_ctype == CType::Bool {
+            return Some(src_val.bool_normalize());
+        }
 
         // Handle float source types: use value-based conversion, not bit manipulation
         if let IrConst::LongDouble(fv, bytes) = &src_val {
@@ -472,6 +479,11 @@ impl Lowerer {
     fn eval_const_expr_as_bits(&self, expr: &Expr) -> Option<(u64, bool)> {
         match expr {
             Expr::Cast(ref target_type, inner, _) => {
+                // _Bool cast chains must preserve normalized 0/1 semantics.
+                if self.type_spec_to_ctype(target_type) == CType::Bool {
+                    let src_val = self.eval_const_expr(inner)?;
+                    return Some((if src_val.is_zero() { 0 } else { 1 }, false));
+                }
                 let (bits, _src_signed) = self.eval_const_expr_as_bits(inner)?;
                 let target_ir_ty = self.type_spec_to_ir(target_type);
                 let target_width = target_ir_ty.size() * 8;
