@@ -147,7 +147,7 @@ def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
 
     try:
         gen = run_cmd(
-            [cfg.yarpgen, "--std=c99", "-d", str(case_dir)],
+            [cfg.yarpgen, "--std=c", "-o", str(case_dir)],
             cwd=root,
             timeout=cfg.compile_timeout,
             merge_stderr=True,
