@@ -314,6 +314,15 @@ impl<'a> ExprTypeChecker<'a> {
             // Statement expression: type of the last expression statement
             Expr::StmtExpr(compound, _) => {
                 if let Some(BlockItem::Statement(Stmt::Expr(Some(expr)))) = compound.items.last() {
+                    // GNU statement expressions have their own local declaration scope.
+                    // If the final expression is an identifier, prefer resolving it
+                    // from declarations inside this compound first so local names
+                    // correctly shadow outer symbols.
+                    if let Expr::Identifier(name, _) = expr {
+                        if let Some(ctype) = self.resolve_var_from_compound(compound, name) {
+                            return Some(ctype);
+                        }
+                    }
                     if let Some(ctype) = self.infer_expr_ctype(expr) {
                         return Some(ctype);
                     }

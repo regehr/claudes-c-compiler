@@ -1344,6 +1344,15 @@ impl Lowerer {
                         }
                     }
                 }
+                // Statement expressions have local declaration scope. If the final
+                // expression is an identifier, resolve it from this compound first
+                // so local declarations shadow outer variables.
+                if let Expr::Identifier(name, _) = expr {
+                    let scope = self.build_compound_scope(compound, parent_scope);
+                    if let Some(ctype) = scope.get(name.as_str()) {
+                        return Some(ctype.clone());
+                    }
+                }
                 // Try normal resolution (works if vars are in sema scope)
                 if let Some(ctype) = self.get_expr_ctype(expr) {
                     return Some(ctype);
