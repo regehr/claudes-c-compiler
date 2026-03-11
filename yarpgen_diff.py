@@ -212,6 +212,16 @@ def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
         write_text_file(case_dir / f"run_{name}.stdout", rp_stdout)
         write_text_file(case_dir / f"run_{name}.stderr", rp_stderr)
 
+        if rp.returncode != 0:
+            return skip(
+                f"{name} runtime failed",
+                seed=seed,
+                detail=(
+                    f"{name} exited with rc={rp.returncode}, "
+                    f"stderr: {short_text(rp_stderr)}"
+                ),
+            )
+
     baseline = results["clang"]
     mismatch = results["gcc"] != baseline or results["ccc"] != baseline
     if mismatch:
