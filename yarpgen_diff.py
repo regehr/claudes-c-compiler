@@ -190,7 +190,6 @@ def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
             return skip(
                 f"{name} compile failed",
                 seed=seed,
-                detail=f"{name} stderr: {short_text(cp_stderr)}",
             )
 
     results: dict[str, tuple[int, str, str]] = {}
