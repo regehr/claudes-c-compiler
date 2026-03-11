@@ -153,7 +153,7 @@ def run_iteration(cfg: WorkerConfig, iteration: int) -> dict[str, Any]:
             merge_stderr=True,
         )
     except subprocess.TimeoutExpired:
-        return fail("yarpgen timed out")
+        return skip("yarpgen timed out", seed="<unknown-seed>")
     except OSError as exc:
         return fail("yarpgen launch failed", detail=f"yarpgen launch error: {exc}")
 
