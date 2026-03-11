@@ -313,7 +313,7 @@ impl<'a> ExprTypeChecker<'a> {
 
             // Statement expression: type of the last expression statement
             Expr::StmtExpr(compound, _) => {
-                if let Some(BlockItem::Statement(Stmt::Expr(Some(expr)))) = compound.items.last() {
+                if let Some(expr) = self.stmt_expr_result_expr(compound) {
                     // GNU statement expressions have their own local declaration scope.
                     // If the final expression is an identifier, prefer resolving it
                     // from declarations inside this compound first so local names
@@ -956,6 +956,33 @@ impl<'a> ExprTypeChecker<'a> {
                     .or_else(|| self.infer_expr_ctype_with_scope(inner, scope))?;
                 Some(CType::Pointer(Box::new(inner_ct), AddressSpace::Default))
             }
+            Expr::StmtExpr(compound, _) => {
+                let inner_expr = self.stmt_expr_result_expr(compound)?;
+                self.infer_expr_ctype(inner_expr)
+                    .or_else(|| self.infer_expr_ctype_with_scope(inner_expr, scope))
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract the value expression of a GNU statement expression by unwrapping
+    /// top-level label wrappers around the final statement.
+    fn stmt_expr_result_expr<'b>(&self, compound: &'b CompoundStmt) -> Option<&'b Expr> {
+        let stmt = match compound.items.last() {
+            Some(BlockItem::Statement(stmt)) => stmt,
+            _ => return None,
+        };
+        self.unwrap_stmt_to_expr(stmt)
+    }
+
+    /// Unwrap label-like statement wrappers to the enclosed expression statement.
+    fn unwrap_stmt_to_expr<'b>(&self, stmt: &'b Stmt) -> Option<&'b Expr> {
+        match stmt {
+            Stmt::Expr(Some(expr)) => Some(expr),
+            Stmt::Label(_, inner, _)
+            | Stmt::Case(_, inner, _)
+            | Stmt::CaseRange(_, _, inner, _)
+            | Stmt::Default(inner, _) => self.unwrap_stmt_to_expr(inner),
             _ => None,
         }
     }

@@ -161,9 +161,7 @@ impl Lowerer {
             }
             Expr::StmtExpr(compound, _) => {
                 // Statement expression: recurse into the last expression statement
-                if let Some(crate::frontend::parser::ast::BlockItem::Statement(
-                    crate::frontend::parser::ast::Stmt::Expr(Some(inner_expr))
-                )) = compound.items.last() {
+                if let Some(inner_expr) = self.stmt_expr_result_expr(compound) {
                     if let Some(size) = self.struct_value_size(inner_expr) {
                         return Some(size);
                     }
@@ -838,7 +836,7 @@ impl Lowerer {
                 if let Some(ctype) = self.get_expr_ctype(expr) {
                     return IrType::from_ctype(&ctype);
                 }
-                if let Some(BlockItem::Statement(Stmt::Expr(Some(expr)))) = compound.items.last() {
+                if let Some(expr) = self.stmt_expr_result_expr(compound) {
                     return self.get_expr_type(expr);
                 }
                 target_int_ir_type()
@@ -1330,7 +1328,7 @@ impl Lowerer {
     /// enabling resolution of nested statement expression patterns like the kernel's
     /// atomic_cmpxchg macro: `typeof(*({ typeof(&obj->member) __ai_ptr = ...; ({ typeof(*__ai_ptr) __ret; ...; __ret; }); }))`
     fn get_stmt_expr_ctype(&self, compound: &CompoundStmt, parent_scope: Option<&FxHashMap<String, CType>>) -> Option<CType> {
-        if let Some(BlockItem::Statement(Stmt::Expr(Some(expr)))) = compound.items.last() {
+        if let Some(expr) = self.stmt_expr_result_expr(compound) {
                 // If the last expression is itself a StmtExpr, we must build
                 // the current scope first and pass it down, so inner typeof()
                 // expressions can reference variables from this compound
@@ -1367,6 +1365,28 @@ impl Lowerer {
                 }
             }
         None
+    }
+
+    /// Extract the value expression of a GNU statement expression by unwrapping
+    /// top-level label wrappers around the final statement.
+    fn stmt_expr_result_expr<'a>(&self, compound: &'a CompoundStmt) -> Option<&'a Expr> {
+        let stmt = match compound.items.last() {
+            Some(BlockItem::Statement(stmt)) => stmt,
+            _ => return None,
+        };
+        self.unwrap_stmt_to_expr(stmt)
+    }
+
+    /// Unwrap label-like statement wrappers to the enclosed expression statement.
+    fn unwrap_stmt_to_expr<'a>(&self, stmt: &'a Stmt) -> Option<&'a Expr> {
+        match stmt {
+            Stmt::Expr(Some(expr)) => Some(expr),
+            Stmt::Label(_, inner, _)
+            | Stmt::Case(_, inner, _)
+            | Stmt::CaseRange(_, _, inner, _)
+            | Stmt::Default(inner, _) => self.unwrap_stmt_to_expr(inner),
+            _ => None,
+        }
     }
 
     /// Build a local scope from declarations in a compound statement.
@@ -1511,7 +1531,7 @@ impl Lowerer {
             // This handles nested stmt exprs like the kernel's cmpxchg macro where
             // the inner compound uses typeof() referencing outer compound variables.
             Expr::StmtExpr(compound, _) => {
-                if let Some(BlockItem::Statement(Stmt::Expr(Some(expr)))) = compound.items.last() {
+                if let Some(expr) = self.stmt_expr_result_expr(compound) {
                     // First try normal resolution
                     if let Some(ctype) = self.get_expr_ctype(expr) {
                         return Some(ctype);
