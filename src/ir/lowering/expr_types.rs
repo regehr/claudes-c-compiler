@@ -4,21 +4,14 @@
 //! It includes helpers for binary operations, subscript, function call return types,
 //! `_Generic` selections, `sizeof` computation, and CType-level expression type resolution.
 
+use super::lower::Lowerer;
 use crate::common::fx_hash::FxHashMap;
+use crate::common::types::{target_int_ir_type, AddressSpace, CType, IrType};
 use crate::frontend::parser::ast::{
-    BinOp,
-    BlockItem,
-    CompoundStmt,
-    Expr,
-    GenericAssociation,
-    Initializer,
-    Stmt,
-    TypeSpecifier,
+    BinOp, BlockItem, CompoundStmt, Expr, GenericAssociation, Initializer, Stmt, TypeSpecifier,
     UnaryOp,
 };
 use crate::ir::reexports::IrConst;
-use crate::common::types::{AddressSpace, CType, IrType, target_int_ir_type};
-use super::lower::Lowerer;
 
 /// Promote small integer types to I32, matching C integer promotion rules.
 /// I8, U8, I16, U16 all promote to I32. All other types are returned unchanged.
@@ -67,7 +60,6 @@ fn bitfield_promoted_type(field_ty: IrType, bf_info: Option<(u32, u32)>) -> IrTy
 }
 
 impl Lowerer {
-
     /// Check if a TypeSpecifier resolves to long double.
     pub(super) fn is_type_spec_long_double(&self, ts: &TypeSpecifier) -> bool {
         match ts {
@@ -86,7 +78,11 @@ impl Lowerer {
 
     /// Get the zero constant for a given IR type.
     pub(super) fn zero_const(&self, ty: IrType) -> IrConst {
-        if ty == IrType::Void { IrConst::Zero } else { IrConst::zero(ty) }
+        if ty == IrType::Void {
+            IrConst::Zero
+        } else {
+            IrConst::zero(ty)
+        }
     }
 
     /// Return the appropriate IrType for storing packed struct/union data of the given size.
@@ -112,7 +108,9 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
-                    if info.is_struct { return Some(info.alloc_size); }
+                    if info.is_struct {
+                        return Some(info.alloc_size);
+                    }
                     // Check if the local is a vector type
                     if let Some(ref ct) = info.c_type {
                         if ct.is_vector() {
@@ -133,23 +131,33 @@ impl Lowerer {
                 }
                 None
             }
-            Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
+            Expr::MemberAccess(base_expr, field_name, _)
+            | Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
                 let ctype = self.resolve_field_ctype(base_expr, field_name, is_ptr)?;
                 if ctype.is_struct_or_union() || ctype.is_vector() {
                     Some(self.ctype_size(&ctype))
-                } else { None }
+                } else {
+                    None
+                }
             }
-            Expr::ArraySubscript(_, _, _) | Expr::Deref(_, _)
-            | Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _)
+            Expr::ArraySubscript(_, _, _)
+            | Expr::Deref(_, _)
+            | Expr::FunctionCall(_, _, _)
+            | Expr::Conditional(_, _, _, _)
             | Expr::GnuConditional(_, _, _)
-            | Expr::Assign(_, _, _) | Expr::CompoundAssign(_, _, _, _)
-            | Expr::Comma(_, _, _) | Expr::Cast(_, _, _)
-            | Expr::BinaryOp(_, _, _, _) | Expr::UnaryOp(_, _, _) => {
+            | Expr::Assign(_, _, _)
+            | Expr::CompoundAssign(_, _, _, _)
+            | Expr::Comma(_, _, _)
+            | Expr::Cast(_, _, _)
+            | Expr::BinaryOp(_, _, _, _)
+            | Expr::UnaryOp(_, _, _) => {
                 let ctype = self.get_expr_ctype(expr)?;
                 if ctype.is_struct_or_union() || ctype.is_vector() {
                     Some(self.ctype_size(&ctype))
-                } else { None }
+                } else {
+                    None
+                }
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
                 let ctype = self.type_spec_to_ctype(type_spec);
@@ -170,10 +178,12 @@ impl Lowerer {
                     // statement's declarations to resolve its type and size.
                     if let Expr::Identifier(name, _) = inner_expr {
                         for item in &compound.items {
-                            if let crate::frontend::parser::ast::BlockItem::Declaration(decl) = item {
+                            if let crate::frontend::parser::ast::BlockItem::Declaration(decl) = item
+                            {
                                 for declarator in &decl.declarators {
                                     if declarator.name == *name {
-                                        let ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                                        let ctype = self
+                                            .build_full_ctype(&decl.type_spec, &declarator.derived);
                                         if ctype.is_struct_or_union() || ctype.is_vector() {
                                             return Some(self.ctype_size(&ctype));
                                         }
@@ -301,31 +311,69 @@ impl Lowerer {
             "__builtin_nan" => Some(IrType::F64),
             "__builtin_nanf" => Some(IrType::F32),
             "__builtin_nanl" => Some(IrType::F128),
-            "__builtin_fabs" | "__builtin_sqrt" | "__builtin_sin" | "__builtin_cos"
-            | "__builtin_log" | "__builtin_log2" | "__builtin_exp" | "__builtin_pow"
-            | "__builtin_floor" | "__builtin_ceil" | "__builtin_round"
-            | "__builtin_fmin" | "__builtin_fmax" | "__builtin_copysign"
+            "__builtin_fabs"
+            | "__builtin_sqrt"
+            | "__builtin_sin"
+            | "__builtin_cos"
+            | "__builtin_log"
+            | "__builtin_log2"
+            | "__builtin_exp"
+            | "__builtin_pow"
+            | "__builtin_floor"
+            | "__builtin_ceil"
+            | "__builtin_round"
+            | "__builtin_fmin"
+            | "__builtin_fmax"
+            | "__builtin_copysign"
             | "__builtin_nextafter" => Some(IrType::F64),
-            "__builtin_fabsf" | "__builtin_sqrtf" | "__builtin_sinf" | "__builtin_cosf"
-            | "__builtin_logf" | "__builtin_expf" | "__builtin_powf"
-            | "__builtin_floorf" | "__builtin_ceilf" | "__builtin_roundf"
+            "__builtin_fabsf"
+            | "__builtin_sqrtf"
+            | "__builtin_sinf"
+            | "__builtin_cosf"
+            | "__builtin_logf"
+            | "__builtin_expf"
+            | "__builtin_powf"
+            | "__builtin_floorf"
+            | "__builtin_ceilf"
+            | "__builtin_roundf"
             | "__builtin_copysignf"
             | "__builtin_nextafterf" => Some(IrType::F32),
             "__builtin_fabsl" | "__builtin_nextafterl" => Some(IrType::F128),
             // Integer-returning classification builtins
-            "__builtin_fpclassify" | "__builtin_isnan" | "__builtin_isinf"
-            | "__builtin_isfinite" | "__builtin_isnormal" | "__builtin_signbit"
-            | "__builtin_signbitf" | "__builtin_signbitl" | "__builtin_isinf_sign"
-            | "__builtin_isgreater" | "__builtin_isgreaterequal"
-            | "__builtin_isless" | "__builtin_islessequal"
-            | "__builtin_islessgreater" | "__builtin_isunordered" => Some(IrType::I32),
+            "__builtin_fpclassify"
+            | "__builtin_isnan"
+            | "__builtin_isinf"
+            | "__builtin_isfinite"
+            | "__builtin_isnormal"
+            | "__builtin_signbit"
+            | "__builtin_signbitf"
+            | "__builtin_signbitl"
+            | "__builtin_isinf_sign"
+            | "__builtin_isgreater"
+            | "__builtin_isgreaterequal"
+            | "__builtin_isless"
+            | "__builtin_islessequal"
+            | "__builtin_islessgreater"
+            | "__builtin_isunordered" => Some(IrType::I32),
             // Bit manipulation builtins return int
-            "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll"
-            | "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll"
-            | "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll"
-            | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"
-            | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
-            | "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => Some(IrType::I32),
+            "__builtin_clz"
+            | "__builtin_clzl"
+            | "__builtin_clzll"
+            | "__builtin_ctz"
+            | "__builtin_ctzl"
+            | "__builtin_ctzll"
+            | "__builtin_clrsb"
+            | "__builtin_clrsbl"
+            | "__builtin_clrsbll"
+            | "__builtin_popcount"
+            | "__builtin_popcountl"
+            | "__builtin_popcountll"
+            | "__builtin_parity"
+            | "__builtin_parityl"
+            | "__builtin_parityll"
+            | "__builtin_ffs"
+            | "__builtin_ffsl"
+            | "__builtin_ffsll" => Some(IrType::I32),
             // Memory/string comparison builtins return int
             "__builtin_memcmp" | "__builtin_strcmp" | "__builtin_strncmp" => Some(IrType::I32),
             // I/O builtins return int
@@ -353,16 +401,25 @@ impl Lowerer {
             "__builtin_cpu_supports" => Some(IrType::I32),
             // Fortification builtins: return type matches the underlying libc function
             // Memory/string functions return pointer (dest)
-            "__builtin___memcpy_chk" | "__builtin___memmove_chk" | "__builtin___memset_chk"
-            | "__builtin___strcpy_chk" | "__builtin___strncpy_chk"
-            | "__builtin___strcat_chk" | "__builtin___strncat_chk"
-            | "__builtin___mempcpy_chk" | "__builtin___stpcpy_chk"
+            "__builtin___memcpy_chk"
+            | "__builtin___memmove_chk"
+            | "__builtin___memset_chk"
+            | "__builtin___strcpy_chk"
+            | "__builtin___strncpy_chk"
+            | "__builtin___strcat_chk"
+            | "__builtin___strncat_chk"
+            | "__builtin___mempcpy_chk"
+            | "__builtin___stpcpy_chk"
             | "__builtin___stpncpy_chk" => Some(IrType::Ptr),
             // printf/fprintf/sprintf/snprintf return int
-            "__builtin___sprintf_chk" | "__builtin___snprintf_chk"
-            | "__builtin___vsprintf_chk" | "__builtin___vsnprintf_chk"
-            | "__builtin___printf_chk" | "__builtin___fprintf_chk"
-            | "__builtin___vprintf_chk" | "__builtin___vfprintf_chk" => Some(IrType::I32),
+            "__builtin___sprintf_chk"
+            | "__builtin___snprintf_chk"
+            | "__builtin___vsprintf_chk"
+            | "__builtin___vsnprintf_chk"
+            | "__builtin___printf_chk"
+            | "__builtin___fprintf_chk"
+            | "__builtin___vprintf_chk"
+            | "__builtin___vfprintf_chk" => Some(IrType::I32),
             // __builtin_va_arg_pack / __builtin_va_arg_pack_len return int
             "__builtin_va_arg_pack" | "__builtin_va_arg_pack_len" => Some(IrType::I32),
             // __builtin_thread_pointer returns a void pointer (thread pointer / TLS base)
@@ -374,8 +431,14 @@ impl Lowerer {
     /// Get the IR type for a binary operation expression.
     fn get_binop_type(&self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> IrType {
         match op {
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-            | BinOp::LogicalAnd | BinOp::LogicalOr => crate::common::types::target_int_ir_type(),
+            BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::LogicalAnd
+            | BinOp::LogicalOr => crate::common::types::target_int_ir_type(),
             BinOp::Shl | BinOp::Shr => {
                 let lty = self.get_expr_type(lhs);
                 promote_integer(lty)
@@ -405,7 +468,9 @@ impl Lowerer {
                 let mut result = rty;
                 let mut cur: &Expr = lhs;
                 // Check complex for the rhs first
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) && rty == IrType::Ptr {
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                    && rty == IrType::Ptr
+                {
                     let rct = self.expr_ctype(rhs);
                     if rct.is_complex() {
                         return IrType::Ptr;
@@ -415,11 +480,16 @@ impl Lowerer {
                     match cur {
                         Expr::BinaryOp(op2, inner_lhs, inner_rhs, _)
                             if !op2.is_comparison()
-                                && !matches!(op2, BinOp::LogicalAnd | BinOp::LogicalOr | BinOp::Shl | BinOp::Shr) =>
+                                && !matches!(
+                                    op2,
+                                    BinOp::LogicalAnd | BinOp::LogicalOr | BinOp::Shl | BinOp::Shr
+                                ) =>
                         {
                             let r_ty = self.get_expr_type(inner_rhs.as_ref());
                             // Check complex for inner rhs
-                            if matches!(op2, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) && r_ty == IrType::Ptr {
+                            if matches!(op2, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                                && r_ty == IrType::Ptr
+                            {
                                 let rct = self.expr_ctype(inner_rhs.as_ref());
                                 if rct.is_complex() {
                                     return IrType::Ptr;
@@ -486,7 +556,8 @@ impl Lowerer {
                 if vi.is_array {
                     // For globals with multi-dim strides, use stride-based type
                     if !vi.array_dim_strides.is_empty() {
-                        return self.ir_type_for_elem_size(*vi.array_dim_strides.last().unwrap_or(&8));
+                        return self
+                            .ir_type_for_elem_size(*vi.array_dim_strides.last().unwrap_or(&8));
                     }
                     return vi.ty;
                 }
@@ -505,7 +576,8 @@ impl Lowerer {
             }
         }
         match base {
-            Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
+            Expr::MemberAccess(base_expr, field_name, _)
+            | Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 let is_ptr = matches!(base, Expr::PointerMemberAccess(..));
                 if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
                     if let CType::Array(elem_ty, _) = &ctype {
@@ -552,17 +624,37 @@ impl Lowerer {
             // the seeded `double round(double)` library signature instead of the
             // actual function pointer's signature.
             if self.is_func_ptr_variable(name) {
-                if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
+                if let Some(ret_ty) = self
+                    .func_meta
+                    .ptr_sigs
+                    .get(name.as_str())
+                    .map(|s| s.return_type)
+                {
                     return ret_ty;
                 }
-                if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
+                if let Some(ret_ty) = self
+                    .func_meta
+                    .sigs
+                    .get(name.as_str())
+                    .map(|s| s.return_type)
+                {
                     return ret_ty;
                 }
             } else {
-                if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
+                if let Some(ret_ty) = self
+                    .func_meta
+                    .sigs
+                    .get(name.as_str())
+                    .map(|s| s.return_type)
+                {
                     return ret_ty;
                 }
-                if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
+                if let Some(ret_ty) = self
+                    .func_meta
+                    .ptr_sigs
+                    .get(name.as_str())
+                    .map(|s| s.return_type)
+                {
                     return ret_ty;
                 }
             }
@@ -587,18 +679,25 @@ impl Lowerer {
     /// Returns the matched expression (or the default), or None if no match.
     /// Both resolve_generic_selection_ctype and resolve_generic_selection_type
     /// delegate to this to avoid duplicating the matching logic.
-    pub(super) fn resolve_generic_selection_expr<'a>(&self, controlling: &Expr, associations: &'a [GenericAssociation]) -> Option<&'a Expr> {
+    pub(super) fn resolve_generic_selection_expr<'a>(
+        &self,
+        controlling: &Expr,
+        associations: &'a [GenericAssociation],
+    ) -> Option<&'a Expr> {
         // For _Generic, compute the controlling expression's type fresh to avoid
         // stale cached values that may have been computed before the controlling
         // expression's dependencies were fully available.
-        let controlling_ctype = self.get_expr_ctype_lowerer(controlling)
+        let controlling_ctype = self
+            .get_expr_ctype_lowerer(controlling)
             .or_else(|| self.lookup_sema_expr_type(controlling));
         let controlling_ir_type = self.get_expr_type(controlling);
         // Per C11 6.5.1.1p2, lvalue conversion includes array-to-pointer and
         // function-to-pointer decay.
         let controlling_ctype = controlling_ctype.map(|ct| match ct {
             CType::Array(elem, _) => CType::Pointer(elem, AddressSpace::Default),
-            CType::Function(ft) => CType::Pointer(Box::new(CType::Function(ft)), AddressSpace::Default),
+            CType::Function(ft) => {
+                CType::Pointer(Box::new(CType::Function(ft)), AddressSpace::Default)
+            }
             other => other,
         });
         // Lvalue conversion also strips top-level qualifiers.
@@ -609,14 +708,20 @@ impl Lowerer {
             false
         };
         let has_const_diff = {
-            let non_default: Vec<_> = associations.iter().filter(|a| a.type_spec.is_some()).collect();
-            let assocs_differ = non_default.iter().any(|a| a.is_const) && non_default.iter().any(|a| !a.is_const);
+            let non_default: Vec<_> = associations
+                .iter()
+                .filter(|a| a.type_spec.is_some())
+                .collect();
+            let assocs_differ =
+                non_default.iter().any(|a| a.is_const) && non_default.iter().any(|a| !a.is_const);
             assocs_differ || ctrl_is_const
         };
         let mut default_expr: Option<&Expr> = None;
         for assoc in associations {
             match &assoc.type_spec {
-                None => { default_expr = Some(&assoc.expr); }
+                None => {
+                    default_expr = Some(&assoc.expr);
+                }
                 Some(type_spec) => {
                     let assoc_ctype = self.type_spec_to_ctype(type_spec);
                     if let Some(ref ctrl_ct) = controlling_ctype {
@@ -642,13 +747,21 @@ impl Lowerer {
     }
 
     /// Resolve the CType of a _Generic selection expression.
-    pub(super) fn resolve_generic_selection_ctype(&self, controlling: &Expr, associations: &[GenericAssociation]) -> Option<CType> {
+    pub(super) fn resolve_generic_selection_ctype(
+        &self,
+        controlling: &Expr,
+        associations: &[GenericAssociation],
+    ) -> Option<CType> {
         let matched = self.resolve_generic_selection_expr(controlling, associations)?;
         self.get_expr_ctype(matched)
     }
 
     /// Resolve the IrType of a _Generic selection expression.
-    pub(super) fn resolve_generic_selection_type(&self, controlling: &Expr, associations: &[GenericAssociation]) -> IrType {
+    pub(super) fn resolve_generic_selection_type(
+        &self,
+        controlling: &Expr,
+        associations: &[GenericAssociation],
+    ) -> IrType {
         if let Some(matched) = self.resolve_generic_selection_expr(controlling, associations) {
             self.get_expr_type(matched)
         } else {
@@ -665,7 +778,11 @@ impl Lowerer {
             Some(IrConst::I32(v)) => v != 0,
             _ => true,
         };
-        if is_nonzero { &args[1] } else { &args[2] }
+        if is_nonzero {
+            &args[1]
+        } else {
+            &args[2]
+        }
     }
 
     // expr_is_const_qualified is defined in expr.rs as pub(super)
@@ -677,28 +794,50 @@ impl Lowerer {
             Expr::IntLiteral(val, _) => {
                 if is_32bit {
                     // On ILP32, int is 32-bit. Values outside i32 range promote to long long (64-bit).
-                    if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 { IrType::I32 } else { IrType::I64 }
+                    if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
+                        IrType::I32
+                    } else {
+                        IrType::I64
+                    }
                 } else {
                     IrType::I64
                 }
             }
-            Expr::CharLiteral(_, _) => if is_32bit { IrType::I32 } else { IrType::I64 },
+            Expr::CharLiteral(_, _) => {
+                if is_32bit {
+                    IrType::I32
+                } else {
+                    IrType::I64
+                }
+            }
             Expr::UIntLiteral(val, _) => {
                 // C `unsigned int` is 32-bit on both ILP32 and LP64.
                 // Values that fit in U32 have type U32; larger ones promote to U64.
-                if *val <= u32::MAX as u64 { IrType::U32 } else { IrType::U64 }
+                if *val <= u32::MAX as u64 {
+                    IrType::U32
+                } else {
+                    IrType::U64
+                }
             }
             Expr::LongLiteral(val, _) => {
                 if is_32bit {
                     // On ILP32, long is 32-bit. Values outside i32 range promote to long long (64-bit).
-                    if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 { IrType::I32 } else { IrType::I64 }
+                    if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
+                        IrType::I32
+                    } else {
+                        IrType::I64
+                    }
                 } else {
                     IrType::I64
                 }
             }
             Expr::ULongLiteral(val, _) => {
                 if is_32bit {
-                    if *val <= u32::MAX as u64 { IrType::U32 } else { IrType::U64 }
+                    if *val <= u32::MAX as u64 {
+                        IrType::U32
+                    } else {
+                        IrType::U64
+                    }
                 } else {
                     IrType::U64
                 }
@@ -709,19 +848,23 @@ impl Lowerer {
             Expr::FloatLiteral(_, _) => IrType::F64,
             Expr::FloatLiteralF32(_, _) => IrType::F32,
             Expr::FloatLiteralLongDouble(_, _, _) => IrType::F128,
-            Expr::ImaginaryLiteral(_, _) | Expr::ImaginaryLiteralF32(_, _)
+            Expr::ImaginaryLiteral(_, _)
+            | Expr::ImaginaryLiteralF32(_, _)
             | Expr::ImaginaryLiteralLongDouble(_, _, _) => IrType::Ptr,
-            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _)
+            Expr::StringLiteral(_, _)
+            | Expr::WideStringLiteral(_, _)
             | Expr::Char16StringLiteral(_, _) => IrType::Ptr,
             Expr::Cast(ref target_type, _, _) => self.type_spec_to_ir(target_type),
-            Expr::UnaryOp(UnaryOp::RealPart, inner, _) | Expr::UnaryOp(UnaryOp::ImagPart, inner, _) => {
+            Expr::UnaryOp(UnaryOp::RealPart, inner, _)
+            | Expr::UnaryOp(UnaryOp::ImagPart, inner, _) => {
                 let inner_ct = self.expr_ctype(inner);
                 if inner_ct.is_complex() {
                     return Self::complex_component_ir_type(&inner_ct);
                 }
                 self.get_expr_type(inner)
             }
-            Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _)
+            Expr::UnaryOp(UnaryOp::Neg, inner, _)
+            | Expr::UnaryOp(UnaryOp::Plus, inner, _)
             | Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let inner_ty = self.get_expr_type(inner);
                 // Only check for complex types if the inner type is Ptr (which complex uses)
@@ -743,12 +886,8 @@ impl Lowerer {
                 // Logical NOT produces C int (I32 on ILP32, I64 on LP64)
                 crate::common::types::target_int_ir_type()
             }
-            Expr::BinaryOp(op, lhs, rhs, _) => {
-                self.get_binop_type(op, lhs, rhs)
-            }
-            Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
-                self.get_expr_type(lhs)
-            }
+            Expr::BinaryOp(op, lhs, rhs, _) => self.get_binop_type(op, lhs, rhs),
+            Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => self.get_expr_type(lhs),
             Expr::Conditional(_, then_expr, else_expr, _) => {
                 let then_ty = self.get_expr_type(then_expr);
                 let else_ty = self.get_expr_type(else_expr);
@@ -762,7 +901,13 @@ impl Lowerer {
             Expr::Comma(_, rhs, _) => self.get_expr_type(rhs),
             Expr::PostfixOp(_, inner, _) => self.get_expr_type(inner),
             Expr::AddressOf(_, _) => IrType::Ptr,
-            Expr::Sizeof(_, _) => if is_32bit { IrType::U32 } else { IrType::U64 },
+            Expr::Sizeof(_, _) => {
+                if is_32bit {
+                    IrType::U32
+                } else {
+                    IrType::U64
+                }
+            }
             Expr::GenericSelection(controlling, associations, _) => {
                 self.resolve_generic_selection_type(controlling, associations)
             }
@@ -772,7 +917,9 @@ impl Lowerer {
                         return self.get_expr_type(self.resolve_builtin_choose_expr(args));
                     }
                     if Self::is_polymorphic_atomic_builtin(name) {
-                        if let Some(pointee_ty) = args.first().and_then(|a| self.get_pointee_type_of_expr(a)) {
+                        if let Some(pointee_ty) =
+                            args.first().and_then(|a| self.get_pointee_type_of_expr(a))
+                        {
                             return pointee_ty;
                         }
                     }
@@ -804,9 +951,7 @@ impl Lowerer {
                 }
                 target_int_ir_type()
             }
-            Expr::ArraySubscript(base, index, _) => {
-                self.get_subscript_type(base, index)
-            }
+            Expr::ArraySubscript(base, index, _) => self.get_subscript_type(base, index),
             Expr::Deref(inner, _) => {
                 if let Some(inner_ctype) = self.get_expr_ctype(inner) {
                     match inner_ctype {
@@ -825,7 +970,8 @@ impl Lowerer {
                 bitfield_promoted_type(field_ty, bf_info)
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                let (_, field_ty, bf_info) = self.resolve_pointer_member_access_full(base_expr, field_name);
+                let (_, field_ty, bf_info) =
+                    self.resolve_pointer_member_access_full(base_expr, field_name);
                 bitfield_promoted_type(field_ty, bf_info)
             }
             Expr::StmtExpr(compound, _) => {
@@ -841,9 +987,7 @@ impl Lowerer {
                 }
                 target_int_ir_type()
             }
-            Expr::CompoundLiteral(type_name, _, _) => {
-                self.type_spec_to_ir(type_name)
-            }
+            Expr::CompoundLiteral(type_name, _, _) => self.type_spec_to_ir(type_name),
             _ => target_int_ir_type(),
         }
     }
@@ -852,8 +996,14 @@ impl Lowerer {
     fn get_binop_ctype(&self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<CType> {
         // Comparison and logical operators always produce int
         match op {
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-            | BinOp::LogicalAnd | BinOp::LogicalOr => {
+            BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::LogicalAnd
+            | BinOp::LogicalOr => {
                 return Some(CType::Int);
             }
             _ => {}
@@ -901,7 +1051,9 @@ impl Lowerer {
                 if let Some(rct) = self.get_expr_ctype(rhs) {
                     match rct {
                         CType::Pointer(_, _) => return Some(rct),
-                        CType::Array(elem, _) => return Some(CType::Pointer(elem, AddressSpace::Default)),
+                        CType::Array(elem, _) => {
+                            return Some(CType::Pointer(elem, AddressSpace::Default))
+                        }
                         _ => {}
                     }
                 }
@@ -948,7 +1100,10 @@ impl Lowerer {
         match &ctype {
             CType::Struct(key) | CType::Union(key) => {
                 // Check if the layout for this key is a forward-declaration stub (size 0, no fields)
-                let is_incomplete = self.types.borrow_struct_layouts().get(&**key)
+                let is_incomplete = self
+                    .types
+                    .borrow_struct_layouts()
+                    .get(&**key)
                     .map(|l| l.fields.is_empty())
                     .unwrap_or(true);
                 if is_incomplete {
@@ -956,7 +1111,10 @@ impl Lowerer {
                     if let Some(cached) = self.types.ctype_cache.borrow().get(&**key) {
                         match cached {
                             CType::Struct(cached_key) | CType::Union(cached_key) => {
-                                let cached_complete = self.types.borrow_struct_layouts().get(&**cached_key)
+                                let cached_complete = self
+                                    .types
+                                    .borrow_struct_layouts()
+                                    .get(&**cached_key)
                                     .map(|l| !l.fields.is_empty())
                                     .unwrap_or(false);
                                 if cached_complete {
@@ -976,7 +1134,12 @@ impl Lowerer {
     /// Get the CType of a struct/union field.
     /// Recursively searches anonymous struct/union members to find the field,
     /// matching the behavior of StructLayout::field_offset().
-    fn get_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
+    fn get_field_ctype(
+        &self,
+        base_expr: &Expr,
+        field_name: &str,
+        is_pointer_access: bool,
+    ) -> Option<CType> {
         let raw_base_ctype = self.get_expr_ctype(base_expr);
         let base_ctype = if is_pointer_access {
             // For p->field, get CType of p, then dereference
@@ -998,7 +1161,9 @@ impl Lowerer {
                 if let Some(layout) = self.types.borrow_struct_layouts().get(&**key) {
                     // Use field_offset which recursively searches anonymous
                     // struct/union members, returning the correct field type
-                    if let Some((_offset, ctype)) = layout.field_offset(field_name, &*self.types.borrow_struct_layouts()) {
+                    if let Some((_offset, ctype)) =
+                        layout.field_offset(field_name, &*self.types.borrow_struct_layouts())
+                    {
                         return Some(ctype);
                     }
                 }
@@ -1044,7 +1209,10 @@ impl Lowerer {
         // typeof(*(type *)0) patterns (e.g., LIST_ELEM macro) reuse
         // Deref(Cast(...)) addresses.  Cast is also bypassed since
         // type_spec_to_ctype is cheap and always correct.
-        let bypass_cache = matches!(expr, Expr::Identifier(..) | Expr::Deref(..) | Expr::Cast(..));
+        let bypass_cache = matches!(
+            expr,
+            Expr::Identifier(..) | Expr::Deref(..) | Expr::Cast(..)
+        );
         if bypass_cache {
             let result = self.get_expr_ctype_lowerer(expr);
             if result.is_some() {
@@ -1088,7 +1256,9 @@ impl Lowerer {
         // locals have been lowered).  Caching None would poison later
         // resolve_typeof calls that need the now-in-scope variable.
         if result.is_some() {
-            self.expr_ctype_cache.borrow_mut().insert(key, (disc, result.clone()));
+            self.expr_ctype_cache
+                .borrow_mut()
+                .insert(key, (disc, result.clone()));
         }
         result
     }
@@ -1105,11 +1275,13 @@ impl Lowerer {
                 // Fall back to sema's function signatures for function-typed identifiers
                 // (e.g., taking address of a function: &func_name)
                 if let Some(func_info) = self.sema_functions.get(name.as_str()) {
-                    return Some(CType::Function(Box::new(crate::common::types::FunctionType {
-                        return_type: func_info.return_type.clone(),
-                        params: func_info.params.clone(),
-                        variadic: func_info.variadic,
-                    })));
+                    return Some(CType::Function(Box::new(
+                        crate::common::types::FunctionType {
+                            return_type: func_info.return_type.clone(),
+                            params: func_info.params.clone(),
+                            variadic: func_info.variadic,
+                        },
+                    )));
                 }
                 // Enum constants have type int in C
                 if self.types.enum_constants.contains_key(name) {
@@ -1156,9 +1328,7 @@ impl Lowerer {
                 }
                 None
             }
-            Expr::Cast(ref type_spec, _, _) => {
-                Some(self.type_spec_to_ctype(type_spec))
-            }
+            Expr::Cast(ref type_spec, _, _) => Some(self.type_spec_to_ctype(type_spec)),
             Expr::MemberAccess(base_expr, field_name, _) => {
                 self.get_field_ctype(base_expr, field_name, false)
             }
@@ -1171,10 +1341,15 @@ impl Lowerer {
                 // C11 6.5.3.3: integer promotions apply to the operand of
                 // unary +, -, and ~.  The result type is the promoted type.
                 let ct = self.get_expr_ctype(inner);
-                ct.map(|c| if c.is_integer() { Self::integer_promote_ctype(&c) } else { c })
+                ct.map(|c| {
+                    if c.is_integer() {
+                        Self::integer_promote_ctype(&c)
+                    } else {
+                        c
+                    }
+                })
             }
-            Expr::UnaryOp(UnaryOp::PreInc, inner, _)
-            | Expr::UnaryOp(UnaryOp::PreDec, inner, _) => {
+            Expr::UnaryOp(UnaryOp::PreInc, inner, _) | Expr::UnaryOp(UnaryOp::PreDec, inner, _) => {
                 // PreInc/PreDec return the operand's own type (no promotion).
                 self.get_expr_ctype(inner)
             }
@@ -1187,7 +1362,8 @@ impl Lowerer {
                 let then_ct = self.get_expr_ctype(then_expr);
                 let else_ct = self.get_expr_ctype(else_expr);
                 CType::conditional_composite_type(
-                    then_ct, else_ct,
+                    then_ct,
+                    else_ct,
                     is_null_pointer_constant(then_expr),
                     is_null_pointer_constant(else_expr),
                 )
@@ -1197,7 +1373,8 @@ impl Lowerer {
                 let cond_ct = self.get_expr_ctype(cond);
                 let else_ct = self.get_expr_ctype(else_expr);
                 CType::conditional_composite_type(
-                    cond_ct, else_ct,
+                    cond_ct,
+                    else_ct,
                     is_null_pointer_constant(cond),
                     is_null_pointer_constant(else_expr),
                 )
@@ -1207,14 +1384,13 @@ impl Lowerer {
                 // String literals have type char[] which decays to char*
                 Some(CType::Pointer(Box::new(CType::Char), AddressSpace::Default))
             }
-            Expr::BinaryOp(op, lhs, rhs, _) => {
-                self.get_binop_ctype(op, lhs, rhs)
-            }
+            Expr::BinaryOp(op, lhs, rhs, _) => self.get_binop_ctype(op, lhs, rhs),
             // Literal types for _Generic support
             // On ILP32, values that overflow the 32-bit type promote to long long
             Expr::IntLiteral(val, _) => {
                 if crate::common::types::target_is_32bit()
-                    && (*val < i32::MIN as i64 || *val > i32::MAX as i64) {
+                    && (*val < i32::MIN as i64 || *val > i32::MAX as i64)
+                {
                     Some(CType::LongLong)
                 } else {
                     Some(CType::Int)
@@ -1229,7 +1405,8 @@ impl Lowerer {
             }
             Expr::LongLiteral(val, _) => {
                 if crate::common::types::target_is_32bit()
-                    && (*val < i32::MIN as i64 || *val > i32::MAX as i64) {
+                    && (*val < i32::MIN as i64 || *val > i32::MAX as i64)
+                {
                     Some(CType::LongLong)
                 } else {
                     Some(CType::Long)
@@ -1250,9 +1427,14 @@ impl Lowerer {
             Expr::FloatLiteralF32(_, _) => Some(CType::Float),
             Expr::FloatLiteralLongDouble(_, _, _) => Some(CType::LongDouble),
             // Wide string literal L"..." has type wchar_t* (which is int* on all targets)
-            Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default)),
+            Expr::WideStringLiteral(_, _) => {
+                Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default))
+            }
             // char16_t string literal u"..." has type char16_t* (which is unsigned short*)
-            Expr::Char16StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::UShort), AddressSpace::Default)),
+            Expr::Char16StringLiteral(_, _) => Some(CType::Pointer(
+                Box::new(CType::UShort),
+                AddressSpace::Default,
+            )),
             Expr::FunctionCall(func, args, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     if name == "__builtin_choose_expr" && args.len() >= 3 {
@@ -1266,7 +1448,12 @@ impl Lowerer {
                         }
                     }
                     // First check lowerer's own func_meta (has ABI-adjusted return_ctype)
-                    if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
+                    if let Some(ctype) = self
+                        .func_meta
+                        .sigs
+                        .get(name.as_str())
+                        .and_then(|s| s.return_ctype.as_ref())
+                    {
                         return Some(ctype.clone());
                     }
                     // Fall back to sema's authoritative function signatures
@@ -1304,14 +1491,15 @@ impl Lowerer {
             Expr::GenericSelection(controlling, associations, _) => {
                 self.resolve_generic_selection_ctype(controlling, associations)
             }
-            Expr::StmtExpr(compound, _) => {
-                self.get_stmt_expr_ctype(compound, None)
-            }
+            Expr::StmtExpr(compound, _) => self.get_stmt_expr_ctype(compound, None),
             // sizeof and alignof always produce size_t (unsigned long on 64-bit,
             // unsigned int on 32-bit). This is needed so typeof(sizeof(...)) resolves
             // correctly in kernel macros.
-            Expr::Sizeof(_, _) | Expr::Alignof(_, _) | Expr::AlignofExpr(_, _)
-            | Expr::GnuAlignof(_, _) | Expr::GnuAlignofExpr(_, _) => {
+            Expr::Sizeof(_, _)
+            | Expr::Alignof(_, _)
+            | Expr::AlignofExpr(_, _)
+            | Expr::GnuAlignof(_, _)
+            | Expr::GnuAlignofExpr(_, _) => {
                 if crate::common::types::target_is_32bit() {
                     Some(CType::UInt)
                 } else {
@@ -1327,43 +1515,37 @@ impl Lowerer {
     /// Optionally accepts a parent scope from an enclosing statement expression,
     /// enabling resolution of nested statement expression patterns like the kernel's
     /// atomic_cmpxchg macro: `typeof(*({ typeof(&obj->member) __ai_ptr = ...; ({ typeof(*__ai_ptr) __ret; ...; __ret; }); }))`
-    fn get_stmt_expr_ctype(&self, compound: &CompoundStmt, parent_scope: Option<&FxHashMap<String, CType>>) -> Option<CType> {
+    fn get_stmt_expr_ctype(
+        &self,
+        compound: &CompoundStmt,
+        parent_scope: Option<&FxHashMap<String, CType>>,
+    ) -> Option<CType> {
         if let Some(expr) = self.stmt_expr_result_expr(compound) {
-                // If the last expression is itself a StmtExpr, we must build
-                // the current scope first and pass it down, so inner typeof()
-                // expressions can reference variables from this compound
-                // (e.g., kernel atomic_cmpxchg: outer declares __ai_ptr,
-                // inner uses typeof(*__ai_ptr)).
-                if let Expr::StmtExpr(inner_compound, _) = expr {
-                    let scope = self.build_compound_scope(compound, parent_scope);
-                    if !scope.is_empty() {
-                        if let Some(ctype) = self.get_stmt_expr_ctype(inner_compound, Some(&scope)) {
-                            return Some(ctype);
-                        }
-                    }
-                }
-                // Statement expressions have local declaration scope. If the final
-                // expression is an identifier, resolve it from this compound first
-                // so local declarations shadow outer variables.
-                if let Expr::Identifier(name, _) = expr {
-                    let scope = self.build_compound_scope(compound, parent_scope);
-                    if let Some(ctype) = scope.get(name.as_str()) {
-                        return Some(ctype.clone());
-                    }
-                }
-                // Try normal resolution (works if vars are in sema scope)
-                if let Some(ctype) = self.get_expr_ctype(expr) {
-                    return Some(ctype);
-                }
-                // Build a local scope from declarations in this compound statement,
-                // inheriting any parent scope from enclosing statement expressions.
-                let scope = self.build_compound_scope(compound, parent_scope);
+            // Build the compound scope up front so the result expression prefers
+            // local declarations over shadowed outer bindings, even when the
+            // tail expression is not a bare identifier (for example `x ?: x`).
+            let scope = self.build_compound_scope(compound, parent_scope);
+
+            // If the last expression is itself a StmtExpr, pass the current scope
+            // down so nested statement expressions can reference outer locals.
+            if let Expr::StmtExpr(inner_compound, _) = expr {
                 if !scope.is_empty() {
-                    if let Some(ctype) = self.get_expr_ctype_with_scope(expr, &scope) {
+                    if let Some(ctype) = self.get_stmt_expr_ctype(inner_compound, Some(&scope)) {
                         return Some(ctype);
                     }
                 }
             }
+
+            if !scope.is_empty() {
+                if let Some(ctype) = self.get_expr_ctype_with_scope(expr, &scope) {
+                    return Some(ctype);
+                }
+            }
+
+            if let Some(ctype) = self.get_expr_ctype(expr) {
+                return Some(ctype);
+            }
+        }
         None
     }
 
@@ -1398,7 +1580,11 @@ impl Lowerer {
     /// Optionally accepts a parent scope from an enclosing statement expression,
     /// allowing inner declarations that use typeof() on outer variables to resolve
     /// correctly (e.g., `typeof(*__ai_ptr)` where `__ai_ptr` is in the outer scope).
-    fn build_compound_scope(&self, compound: &CompoundStmt, parent_scope: Option<&FxHashMap<String, CType>>) -> FxHashMap<String, CType> {
+    fn build_compound_scope(
+        &self,
+        compound: &CompoundStmt,
+        parent_scope: Option<&FxHashMap<String, CType>>,
+    ) -> FxHashMap<String, CType> {
         let mut local_scope: FxHashMap<String, CType> = FxHashMap::default();
 
         // Seed with parent scope so inner typeof expressions can reference
@@ -1419,7 +1605,8 @@ impl Lowerer {
                     // rather than defaulting to int (which loses signedness/size info).
                     if matches!(&decl.type_spec, TypeSpecifier::AutoType) {
                         if let Some(Initializer::Expr(ref init_expr)) = declarator.init {
-                            if let Some(ctype) = self.get_expr_ctype(init_expr)
+                            if let Some(ctype) = self
+                                .get_expr_ctype(init_expr)
                                 .or_else(|| self.get_expr_ctype_with_scope(init_expr, &local_scope))
                             {
                                 let full_ctype = self.build_full_ctype(
@@ -1436,7 +1623,9 @@ impl Lowerer {
                     // Use try_resolve to avoid emitting warnings during speculative
                     // scope building; skip declarations where typeof fails rather
                     // than using a wrong fallback type.
-                    if let Some(resolved_ts) = self.try_resolve_typeof_with_scope(&decl.type_spec, &local_scope) {
+                    if let Some(resolved_ts) =
+                        self.try_resolve_typeof_with_scope(&decl.type_spec, &local_scope)
+                    {
                         let ctype = self.build_full_ctype(&resolved_ts, &declarator.derived);
                         local_scope.insert(declarator.name.clone(), ctype);
                     }
@@ -1454,20 +1643,22 @@ impl Lowerer {
     /// supplementary scope. Returns None on failure instead of falling back to
     /// Int. Used during speculative scope building (build_compound_scope) where
     /// callers need to know if resolution failed to avoid propagating wrong types.
-    fn try_resolve_typeof_with_scope(&self, ts: &TypeSpecifier, scope: &FxHashMap<String, CType>) -> Option<TypeSpecifier> {
+    fn try_resolve_typeof_with_scope(
+        &self,
+        ts: &TypeSpecifier,
+        scope: &FxHashMap<String, CType>,
+    ) -> Option<TypeSpecifier> {
         match ts {
             TypeSpecifier::Typeof(expr) => {
-                if let Some(ctype) = self.get_expr_ctype(expr) {
+                if let Some(ctype) = self.get_expr_ctype_with_scope(expr, scope) {
                     return Some(Self::ctype_to_type_spec(&ctype));
                 }
-                if let Some(ctype) = self.get_expr_ctype_with_scope(expr, scope) {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
                     return Some(Self::ctype_to_type_spec(&ctype));
                 }
                 None // caller decides what to do
             }
-            TypeSpecifier::TypeofType(inner) => {
-                self.try_resolve_typeof_with_scope(inner, scope)
-            }
+            TypeSpecifier::TypeofType(inner) => self.try_resolve_typeof_with_scope(inner, scope),
             other => Some(other.clone()),
         }
     }
@@ -1476,15 +1667,20 @@ impl Lowerer {
     /// This handles the common typeof patterns (identifier, deref, address-of, cast)
     /// where the identifier is declared in the same compound statement.
     /// More complex expressions (member access, subscript, etc.) are not supported.
-    fn get_expr_ctype_with_scope(&self, expr: &Expr, scope: &FxHashMap<String, CType>) -> Option<CType> {
+    fn get_expr_ctype_with_scope(
+        &self,
+        expr: &Expr,
+        scope: &FxHashMap<String, CType>,
+    ) -> Option<CType> {
+        let prefer_scope = |expr: &Expr| {
+            self.get_expr_ctype_with_scope(expr, scope)
+                .or_else(|| self.get_expr_ctype(expr))
+        };
+
         match expr {
-            Expr::Identifier(name, _) => {
-                scope.get(name.as_str()).cloned()
-            }
+            Expr::Identifier(name, _) => scope.get(name.as_str()).cloned(),
             Expr::Deref(inner, _) => {
-                if let Some(inner_ct) = self.get_expr_ctype(inner)
-                    .or_else(|| self.get_expr_ctype_with_scope(inner, scope))
-                {
+                if let Some(inner_ct) = prefer_scope(inner) {
                     match inner_ct {
                         CType::Pointer(pointee, _) => return Some(*pointee),
                         CType::Array(elem, _) => return Some(*elem),
@@ -1494,9 +1690,7 @@ impl Lowerer {
                 None
             }
             Expr::AddressOf(inner, _) => {
-                if let Some(inner_ct) = self.get_expr_ctype(inner)
-                    .or_else(|| self.get_expr_ctype_with_scope(inner, scope))
-                {
+                if let Some(inner_ct) = prefer_scope(inner) {
                     return Some(CType::Pointer(Box::new(inner_ct), AddressSpace::Default));
                 }
                 None
@@ -1505,21 +1699,36 @@ impl Lowerer {
                 // typeof((type)expr) = type
                 Some(self.type_spec_to_ctype(type_spec))
             }
-            // Conditional: use the then-branch type (matches get_expr_ctype behavior)
-            Expr::Conditional(_, then_expr, _, _) => {
-                self.get_expr_ctype(then_expr)
-                    .or_else(|| self.get_expr_ctype_with_scope(then_expr, scope))
+            Expr::Conditional(_, then_expr, else_expr, _) => {
+                use crate::common::const_arith::is_null_pointer_constant;
+                CType::conditional_composite_type(
+                    prefer_scope(then_expr),
+                    prefer_scope(else_expr),
+                    is_null_pointer_constant(then_expr),
+                    is_null_pointer_constant(else_expr),
+                )
+            }
+            Expr::GnuConditional(cond, else_expr, _) => {
+                use crate::common::const_arith::is_null_pointer_constant;
+                CType::conditional_composite_type(
+                    prefer_scope(cond),
+                    prefer_scope(else_expr),
+                    is_null_pointer_constant(cond),
+                    is_null_pointer_constant(else_expr),
+                )
             }
             // Binary ops: try to infer from operands using scope
             Expr::BinaryOp(_, lhs, rhs, _) => {
-                let lhs_ct = self.get_expr_ctype(lhs)
-                    .or_else(|| self.get_expr_ctype_with_scope(lhs, scope));
-                let rhs_ct = self.get_expr_ctype(rhs)
-                    .or_else(|| self.get_expr_ctype_with_scope(rhs, scope));
+                let lhs_ct = prefer_scope(lhs);
+                let rhs_ct = prefer_scope(rhs);
                 // Return the wider type (simple heuristic matching usual arithmetic conversions)
                 match (lhs_ct, rhs_ct) {
                     (Some(l), Some(r)) => {
-                        if l.size() >= r.size() { Some(l) } else { Some(r) }
+                        if l.size() >= r.size() {
+                            Some(l)
+                        } else {
+                            Some(r)
+                        }
                     }
                     (Some(l), None) => Some(l),
                     (None, Some(r)) => Some(r),
@@ -1532,16 +1741,15 @@ impl Lowerer {
             // the inner compound uses typeof() referencing outer compound variables.
             Expr::StmtExpr(compound, _) => {
                 if let Some(expr) = self.stmt_expr_result_expr(compound) {
-                    // First try normal resolution
-                    if let Some(ctype) = self.get_expr_ctype(expr) {
-                        return Some(ctype);
-                    }
                     // Build a combined scope: outer scope + inner declarations
                     let combined_scope = self.build_compound_scope(compound, Some(scope));
                     if !combined_scope.is_empty() {
                         if let Some(ctype) = self.get_expr_ctype_with_scope(expr, &combined_scope) {
                             return Some(ctype);
                         }
+                    }
+                    if let Some(ctype) = self.get_expr_ctype(expr) {
+                        return Some(ctype);
                     }
                 }
                 None
