@@ -1719,19 +1719,70 @@ impl Lowerer {
             }
             // Binary ops: try to infer from operands using scope
             Expr::BinaryOp(_, lhs, rhs, _) => {
-                let lhs_ct = prefer_scope(lhs);
-                let rhs_ct = prefer_scope(rhs);
-                // Return the wider type (simple heuristic matching usual arithmetic conversions)
-                match (lhs_ct, rhs_ct) {
-                    (Some(l), Some(r)) => {
-                        if l.size() >= r.size() {
-                            Some(l)
-                        } else {
-                            Some(r)
+                let Expr::BinaryOp(op, _, _, _) = expr else { unreachable!() };
+
+                if op.is_comparison() {
+                    return Some(CType::Int);
+                }
+
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    return prefer_scope(lhs)
+                        .map(|ct| Self::integer_promote_ctype(&ct))
+                        .or(Some(CType::Int));
+                }
+
+                if matches!(op, BinOp::Add | BinOp::Sub) {
+                    if let Some(lct) = prefer_scope(lhs) {
+                        match &lct {
+                            CType::Pointer(_, _) => {
+                                if *op == BinOp::Sub
+                                    && prefer_scope(rhs).is_some_and(|rct| rct.is_pointer_like())
+                                {
+                                    return Some(CType::Long);
+                                }
+                                return Some(lct);
+                            }
+                            CType::Array(elem, _) => {
+                                if *op == BinOp::Sub
+                                    && prefer_scope(rhs).is_some_and(|rct| rct.is_pointer_like())
+                                {
+                                    return Some(CType::Long);
+                                }
+                                return Some(CType::Pointer(elem.clone(), AddressSpace::Default));
+                            }
+                            _ => {}
                         }
                     }
-                    (Some(l), None) => Some(l),
-                    (None, Some(r)) => Some(r),
+                    if *op == BinOp::Add {
+                        if let Some(rct) = prefer_scope(rhs) {
+                            match rct {
+                                CType::Pointer(_, _) => return Some(rct),
+                                CType::Array(elem, _) => {
+                                    return Some(CType::Pointer(elem, AddressSpace::Default));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                let lhs_ct = prefer_scope(lhs);
+                let rhs_ct = prefer_scope(rhs);
+                if let Some(ref l) = lhs_ct {
+                    if l.is_vector() {
+                        return Some(l.clone());
+                    }
+                }
+                if let Some(ref r) = rhs_ct {
+                    if r.is_vector() {
+                        return Some(r.clone());
+                    }
+                }
+
+                match (lhs_ct, rhs_ct) {
+                    (Some(l), Some(r)) => Some(CType::usual_arithmetic_conversion(&l, &r)),
+                    (Some(l), None) => Some(Self::integer_promote_ctype(&l)),
+                    (None, Some(r)) => Some(Self::integer_promote_ctype(&r)),
                     (None, None) => None,
                 }
             }
