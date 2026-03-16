@@ -442,18 +442,3 @@ Standing policy:
   - Sanitizers only check executed paths.
   - Dead-path UB may remain in reduced output; inspect reduced expressions manually when needed.
 
-## Bugs Fixed
-
-- https://github.com/regehr/claudes-c-compiler/commit/4d9913e7f53be66e6de30869e1a324020ce81777
-- https://github.com/regehr/claudes-c-compiler/commit/32fe7f5e5fe08bb0b7bf3ee7e6bb90234356d29e
-- https://github.com/regehr/claudes-c-compiler/commit/abeb8fbdce8c6f2c99557cf148efc9483b9c902a
-- https://github.com/regehr/claudes-c-compiler/commit/00fbea89eb855a359eea6c2c976b0c2f2fbecd1e
-- https://github.com/regehr/claudes-c-compiler/commit/90905856a09bba6ab4df4aade850342078db7850
-- https://github.com/regehr/claudes-c-compiler/commit/c01bac0f988471855c5422cafe5d3d57e5ed2e58
-- https://github.com/regehr/claudes-c-compiler/commit/5b0447eabf19163c90484415d7a292df1781af66
-- https://github.com/regehr/claudes-c-compiler/commit/b1c97854ffa7b9d3d5f53f93f0a089ca0b56f0f6
-- https://github.com/regehr/claudes-c-compiler/commit/acc1b4a5f9618d7e7d9c7e917afe7b622caf346a
-- https://github.com/regehr/claudes-c-compiler/commit/ceff82eba63c2b9290370e48fac850a7a709d8f9
-- https://github.com/regehr/claudes-c-compiler/commit/9fe29b62241e3e08a82bbe61d752fc0660a6526c
-
-    
